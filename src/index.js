@@ -3,72 +3,116 @@ const path = require('path');
 const wss_lib = require('ws');
 const rosnodejs = require('rosnodejs');
 const std_msgs = rosnodejs.require('std_msgs').msg;
-const net = require('node:net');
+const geom_msgs = rosnodejs.require('geometry_msgs').msg;
+
+const net = require('net');
 
 const app = express();
 const non_browser_server = net.createServer();
 const wss = new wss_lib.Server({ noServer: true });
+
 const wsockets = [];
 const dt_sockets = [];
-const desktop_server_port = 3000;
+const desktop_server_port = 4000;
 const http_server_port = 8080;
 
-// Go through all sockets for web and non web and send out data
-function send_data_on_sockets(data)
-{
-    for (let i = 0; i < wsockets.length; ++i)
-        wsockets[i].send(data);
-    for (let i = 0; i < dt_sockets.length; ++i)
-        dt_sockets[i].send(data);
-}
-
-function setup_socket(sckt)
-{
-    console.log("new client connected");
-
-    // sending message
-    sckt.on("message", data => {
-        console.log(`Client has sent us: ${data}`)
-    });
-
-    // handling what to do when clients disconnects from server
-    sckt.on("close", () => {
-        console.log("the client has disconnected");
-    });
-
-    // handling client connection error
-    sckt.onerror = function () {
-        console.log("Some Error occurred")
-    }
-}
-
+let pub = {};
 
 // Create command server ROS node wich will relay our socket communications to control and monitor the robot
 rosnodejs.initNode("/command_server")
-.then((ros_node) => {  
-    let sub = ros_node.subscribe("/map", "nav_msgs/OccupancyGrid",
-    (data) => { // define callback execution
-        console.log("Got updated map - size is " + data.info.width + " by " + data.info.height);
-        send_data_on_sockets(data.info.width);
+    .then((ros_node) => {
+        // let sub = ros_node.subscribe("/map", "nav_msgs/OccupancyGrid",
+        // (data) => { // define callback execution
+        //     console.log("Got updated map - size is " + data.info.width + " by " + data.info.height);
+        //     send_data_on_sockets(data.info.width);
+        // });
+        pub = rosnodejs.nh.advertise('/cmd_vel', 'geometry_msgs/Twist');
     });
-});
 
 
 // Serve to browsers via websockets
 wss.on("connection", web_sckt => {
-    setup_socket(web_sckt, wsockets);
+    console.log("New client connected for web sockets");
+
+    // sending message
+    web_sckt.on("message", data => {
+        const hdr = parse_command_header(data);
+        if (hdr.command === 0) {
+            const vel_cmd = parse_vel_cmd(data);
+            const msg = new geom_msgs.Twist;
+            msg.linear.x = vel_cmd.linear;
+            msg.angular.z = vel_cmd.angular;
+            pub.publish(msg);
+        }
+    });
+
+    // handling what to do when clients disconnects from server
+    web_sckt.on("close", () => {
+        console.log("the client has disconnected");
+    });
+
+    // handling client connection error
+    web_sckt.onerror = function () {
+        console.log("Some Error occurred")
+    }
+
     wsockets.push(web_sckt);
 });
 
+
+function parse_command_header(buf) {
+    return {
+        command: buf.readInt8(0),
+        future: buf.readInt8(1),
+        future1: buf.readInt8(2),
+        future2: buf.readInt8(3)
+    };
+}
+
+function parse_vel_cmd(buf) {
+    return {
+        linear: buf.readFloatLE(4),
+        angular: buf.readFloatLE(8)
+    };
+}
+
+
 // Serve to desktop/smartphone clients - these are not web sockets
 non_browser_server.on("connection", dt_skt => {
-    setup_socket(dt_skt);
+    console.log("Got connection from " + dt_skt.remoteAddress + " on port " + dt_skt.remotePort);
+    // sending message
+    dt_skt.on("data", data => {
+        const hdr = parse_command_header(data);
+        if (hdr.command === 0) {
+            const vel_cmd = parse_vel_cmd(data);
+            const msg = new geom_msgs.Twist;
+            msg.linear.x = vel_cmd.linear;
+            msg.angular.z = vel_cmd.angular;
+            pub.publish(msg);
+        }
+    });
+
+    dt_skt.on("end", data => {
+        console.log(`client ended`);
+    });
+
+    dt_skt.on("error", data => {
+        console.log(`Client has sent us: ${data}`)
+    });
+
+    // handling what to do when clients disconnects from server
+    dt_skt.on("close", () => {
+        console.log("the client has disconnected");
+    });
+
+    //dt_skt.pipe(dt_skt);
     dt_sockets.push(dt_skt);
+
 });
 
 // Serve up the emscripten generated main page
-app.get('/', function(req, res){
-   res.sendFile(path.join(__dirname, 'emscripten', 'jackal_ctrl.html'));
+app.get('/', function (req, res) {
+    res.sendFile(path.join(__dirname, 'emscripten', 'jackal_ctrl.html'));
 });
 
 // The html shell above refernces other files in the same dir - make all files available (must use full path relative doesn't work)
@@ -79,9 +123,9 @@ app.use(express.static(path.join(__dirname, 'emscripten')));
 const main_server = app.listen(http_server_port);
 main_server.on('upgrade', (request, socket, head) => {
     wss.handleUpgrade(request, socket, head, socket => {
-      wss.emit('connection', socket, request);
+        wss.emit('connection', socket, request);
     });
-  });
+});
 
 // Listen for non websocket connections
 non_browser_server.listen(desktop_server_port);
