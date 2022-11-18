@@ -1,22 +1,24 @@
 const express = require('express');
 const path = require('path');
-const wss_lib = require('ws');
 const rosnodejs = require('rosnodejs');
 const geom_msgs = rosnodejs.require('geometry_msgs').msg;
+const wss_lib = require('ws');
+const http = require('http');
 // const sensor_msgs = rosnodejs.require('sensor_msgs').msg;
 // const nav_msgs = rosnodejs.require('nav_msgs').msg;
 
 const net = require('net');
 const { Buffer } = require('buffer');
 
-const app = express();
-const non_browser_server = net.createServer();
-const wss = new wss_lib.Server({ noServer: true });
-
 const wsockets = [];
 const dt_sockets = [];
 const desktop_server_port = 4000;
 const http_server_port = 8080;
+
+const app = express();
+const http_server = http.createServer(app);
+const non_browser_server = net.createServer();
+const wss = new wss_lib.Server({ noServer: true });
 
 const PACKET_STR_ID_LEN = 16;
 const TFORM_NODE_NAME_LEN = 32;
@@ -39,8 +41,7 @@ function get_element_index(value, array) {
     return array.findIndex((element) => { return value === element });
 }
 
-function remove_element_at_index(ind, array)
-{
+function remove_element_at_index(ind, array) {
     const last_ind = array.length - 1;
     if (ind < 0)
         return;
@@ -56,7 +57,7 @@ function remove_socket_from_array(sckt, array) {
 
 function send_packet_to_clients(packet) {
     for (let i = 0; i < wsockets.length; ++i)
-        wsockets[i].send(packet);
+        wsockets[i].send(packet, { binary: true });
     for (let i = 0; i < dt_sockets.length; ++i)
         dt_sockets[i].write(packet);
 }
@@ -79,14 +80,13 @@ const vel_cmd_header = {
 
 
 function write_packet_string(str, len, packet, offset) {
-    for (let i = 0; i < len; ++i)
-    {
+    for (let i = 0; i < len; ++i) {
         if (i < str.length)
-            packet.writeInt8(str.charCodeAt(i), offset+i);
+            packet.writeInt8(str.charCodeAt(i), offset + i);
         else
-            packet.writeInt8(0, offset+i);
+            packet.writeInt8(0, offset + i);
     }
-    return offset+len;
+    return offset + len;
 }
 
 function write_packet_header(packet_header, packet, offset) {
@@ -109,8 +109,7 @@ function get_occ_grid_delta(cur_occ_grid, prev_occ_grid) {
     return changes;
 }
 
-function get_occgrid_packet_size(frame_changes)
-{
+function get_occgrid_packet_size(frame_changes) {
     // Packet size is header plus map meta data (3 4 byte values) plus the origin pos and orientation
     // (total of 7 doubles which are each 8 bytes), a single 4 byte value for the length of the changes array,
     // and then the changes array where each entry is a 4 byte value - 3 MSB for the index and 1 LSB for the likelyhood value
@@ -125,7 +124,7 @@ function add_occgrid_to_packet(occ_grid_msg, frame_changes, packet, offset) {
     offset = packet.writeFloatLE(occ_grid_msg.info.resolution, offset);
     offset = packet.writeUInt32LE(occ_grid_msg.info.width, offset);
     offset = packet.writeUInt32LE(occ_grid_msg.info.height, offset);
-    
+
     // Origin position
     offset = packet.writeDoubleLE(occ_grid_msg.info.origin.position.x, offset);
     offset = packet.writeDoubleLE(occ_grid_msg.info.origin.position.y, offset);
@@ -136,7 +135,7 @@ function add_occgrid_to_packet(occ_grid_msg, frame_changes, packet, offset) {
     offset = packet.writeDoubleLE(occ_grid_msg.info.origin.orientation.y, offset);
     offset = packet.writeDoubleLE(occ_grid_msg.info.origin.orientation.z, offset);
     offset = packet.writeDoubleLE(occ_grid_msg.info.origin.orientation.w, offset);
-    
+
     // Length of changes array
     dlog(`Sending frame_changes length ${frame_changes.length}`);
     offset = packet.writeUInt32LE(frame_changes.length, offset);
@@ -144,7 +143,7 @@ function add_occgrid_to_packet(occ_grid_msg, frame_changes, packet, offset) {
     for (let i = 0; i < frame_changes.length; ++i) {
 
         console.assert((frame_changes[i].val < 16777216), "Changes array size is larger than allowed max");
-            // Shift index to the left by one byte and use the LSByte for the likelihood value
+        // Shift index to the left by one byte and use the LSByte for the likelihood value
         // Since this is javascript, gotta manually check for -1 and convert to 255 to keep it within a byte
         let byte_val = frame_changes[i].val;
         if (byte_val == -1)
@@ -170,7 +169,7 @@ function add_scan_to_packet(scan, packet, offset) {
 
 function parse_command_header(buf) {
     // Remove the null bytes from the end for comparison to our header stringsS
-    return buf.toString('utf8', 0, PACKET_STR_ID_LEN).replace(/\0/g, '');  
+    return buf.toString('utf8', 0, PACKET_STR_ID_LEN).replace(/\0/g, '');
 }
 
 function parse_vel_cmd(buf) {
@@ -181,7 +180,7 @@ function parse_vel_cmd(buf) {
 }
 
 function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg) {
-    
+
     // Used to see if we need to send the packet at all
     const total_connections = wsockets.length + dt_sockets.length;
 
@@ -189,14 +188,13 @@ function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg) {
     let occ_data = [];
     if ('data' in prev_occ_grid_msg)
         occ_data = prev_occ_grid_msg.data;
-    
+
     // We don't need to send the entire costmap every update - instead just send the size of the costmap and changes
     // since the last update    
     const frame_changes = get_occ_grid_delta(cur_occ_grid_msg.data, occ_data);
-    
+
     // Only create the packet and send it if there are clients connected
-    if (total_connections > 0)
-    {
+    if (total_connections > 0) {
         const packet_size = get_occgrid_packet_size(frame_changes);
         const packet = new Buffer.alloc(packet_size);
         add_occgrid_to_packet(cur_occ_grid_msg, frame_changes, packet, 0);
@@ -207,8 +205,7 @@ function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg) {
 
 /// When a new connection is established
 function send_prev_occ_grid_to_new_client(occ_grid_msg, socket, func_to_use) {
-    if ('data' in occ_grid_msg)
-    {
+    if ('data' in occ_grid_msg) {
         const frame_all_changes = get_occ_grid_delta(occ_grid_msg.data, []);
         const packet_size = get_occgrid_packet_size(frame_all_changes);
         const packet = new Buffer.alloc(packet_size);
@@ -216,14 +213,12 @@ function send_prev_occ_grid_to_new_client(occ_grid_msg, socket, func_to_use) {
         dlog(`Sending occ grid packet (${packet.length} bytes) to newly connected client`);
         func_to_use(socket, packet);
     }
-    else
-    {
+    else {
         dlog("No occ grid message stored from ROS to send to newly connected client");
     }
 }
 
-function add_transform_to_packet(tf, packet, offset)
-{    
+function add_transform_to_packet(tf, packet, offset) {
     offset = write_packet_header(tform_pcket_header, packet, offset);
     offset = write_packet_string(tf.header.frame_id, TFORM_NODE_NAME_LEN, packet, offset);
     offset = write_packet_string(tf.child_frame_id, TFORM_NODE_NAME_LEN, packet, offset);
@@ -241,26 +236,22 @@ function add_transform_to_packet(tf, packet, offset)
     return offset;
 }
 
-function convert_tforms_key_val(tf_message, converted)
-{
-    for (let i = 0; i < tf_message.transforms.length; ++i){
+function convert_tforms_key_val(tf_message, converted) {
+    for (let i = 0; i < tf_message.transforms.length; ++i) {
         converted[tf_message.transforms[i].child_frame_id] = tf_message.transforms[i];
     }
 }
 
-function add_transforms_to_packet(tforms, packet, offset)
-{
+function add_transforms_to_packet(tforms, packet, offset) {
     for (const [key, value] of Object.entries(tforms)) {
         offset = add_transform_to_packet(value, packet, offset);
     }
     return offset;
 }
 
-function send_static_tforms_to_new_client(tforms, socket, func_to_use)
-{
+function send_static_tforms_to_new_client(tforms, socket, func_to_use) {
     const item_count = Object.keys(tforms).length;
-    if (item_count !== 0)
-    {
+    if (item_count !== 0) {
         let packet_size = get_transforms_packet_size(tforms);
         let offset = 0;
         const packet = new Buffer.alloc(packet_size);
@@ -268,30 +259,36 @@ function send_static_tforms_to_new_client(tforms, socket, func_to_use)
         func_to_use(socket, packet);
         dlog(`Sent ${item_count} static transforms (${packet.length} bytes) to newly connected client`);
     }
-    else
-    {
+    else {
         dlog("No static transforms stored from ROS to send to newly connected client");
     }
 }
 
-function get_scan_packet_size(scan_msg)
-{
+function get_scan_packet_size(scan_msg) {
     return PACKET_STR_ID_LEN + 20 + scan_msg.ranges.length * 4;
 }
 
-function get_transform_packet_size()
-{
-    return PACKET_STR_ID_LEN + 32 + 32 + 8*3 + 8*4;
+function get_transform_packet_size() {
+    return PACKET_STR_ID_LEN + 32 + 32 + 8 * 3 + 8 * 4;
 }
 
-function get_transforms_packet_size(tforms)
-{
+function get_transforms_packet_size(tforms) {
     return get_transform_packet_size() * Object.keys(tforms).length;
+}
+let every_other = true;
+
+function send_tforms(tforms) {
+    const packet = new Buffer.alloc(get_transforms_packet_size(tforms));
+    add_transforms_to_packet(tforms, packet, 0);
+    send_packet_to_clients(packet);
 }
 
 // Create command server ROS node wich will relay our socket communications to control and monitor the robot
 rosnodejs.initNode("/command_server")
     .then((ros_node) => {
+
+        setInterval(send_tforms, 30, frame_tforms);
+
         // Subscribe to the occupancy grid map messages - send packet with the map info
         ros_node.subscribe("/map", "nav_msgs/OccupancyGrid",
             (occ_grid_msg) => {
@@ -301,22 +298,21 @@ rosnodejs.initNode("/command_server")
 
         // Subscribe to the transform topic - send packets for each transform
         ros_node.subscribe("/tf", "tf2_msgs/TFMessage",
-        (tf_message) => {
-            convert_tforms_key_val(tf_message, frame_tforms);
-        });
+            (tf_message) => {
+                convert_tforms_key_val(tf_message, frame_tforms);
+
+            });
 
         ros_node.subscribe("/tf_static", "tf2_msgs/TFMessage",
-        (tf_message) => {
-            convert_tforms_key_val(tf_message, static_tforms);
-        });
+            (tf_message) => {
+                convert_tforms_key_val(tf_message, static_tforms);
+            });
 
         // Subscribe to the laser scan messages - send a packet with the scan info
         ros_node.subscribe("/front/scan", "sensor_msgs/LaserScan",
             (scan) => {
-                let packet_size = get_transforms_packet_size(frame_tforms) + get_scan_packet_size(scan);
-                const packet = new Buffer.alloc(packet_size);
-                let offset = add_scan_to_packet(scan, packet, 0);
-                offset = add_transforms_to_packet(frame_tforms, packet, offset);
+                const packet = new Buffer.alloc(get_scan_packet_size(scan));
+                add_scan_to_packet(scan, packet, 0);
                 send_packet_to_clients(packet);
             });
         pub = rosnodejs.nh.advertise('/cmd_vel', 'geometry_msgs/Twist');
@@ -348,8 +344,8 @@ wss.on("connection", web_sckt => {
     });
 
     wsockets.push(web_sckt);
-    send_prev_occ_grid_to_new_client(prev_frame_occ_grid_msg, web_sckt, (sckt, pckt) => {sckt.send(pckt);});
-    send_static_tforms_to_new_client(static_tforms, web_sckt, (sckt, pckt) => {sckt.send(pckt);});
+    send_prev_occ_grid_to_new_client(prev_frame_occ_grid_msg, web_sckt, (sckt, pckt) => { sckt.send(pckt); });
+    send_static_tforms_to_new_client(static_tforms, web_sckt, (sckt, pckt) => { sckt.send(pckt); });
     ilog(`New client connected for web sockets - ${wsockets.length} web sockets connected`);
 });
 
@@ -378,8 +374,8 @@ non_browser_server.on("connection", (dt_skt) => {
     });
 
     dt_sockets.push(dt_skt);
-    send_prev_occ_grid_to_new_client(prev_frame_occ_grid_msg, dt_skt, (sckt, pckt) => {sckt.write(pckt);});
-    send_static_tforms_to_new_client(static_tforms, dt_skt, (sckt, pckt) => {sckt.write(pckt);});
+    send_prev_occ_grid_to_new_client(prev_frame_occ_grid_msg, dt_skt, (sckt, pckt) => { sckt.write(pckt); });
+    send_static_tforms_to_new_client(static_tforms, dt_skt, (sckt, pckt) => { sckt.write(pckt); });
     ilog(`Client connected from ${dt_skt.remoteAddress}:${dt_skt.remotePort} - ${dt_sockets.length} non ws clients connected`);
 });
 
@@ -399,15 +395,14 @@ app.get('/', function (req, res) {
 // The html shell above refernces other files in the same dir - make all files available (must use full path relative doesn't work)
 app.use(express.static(path.join(__dirname, 'emscripten')));
 
-// List on the normal http server - and when an upgrade request comes through (for websockets protocol), then route the
-// request to the above websocket handler
-const main_server = app.listen(http_server_port);
 
-main_server.on('upgrade', (request, socket, head) => {
+http_server.on('upgrade', (request, socket, head) => {
     wss.handleUpgrade(request, socket, head, socket => {
         wss.emit('connection', socket, request);
     });
 });
+
+http_server.listen(http_server_port);
 
 // Listen for non websocket connections
 non_browser_server.listen(desktop_server_port);
