@@ -185,6 +185,36 @@ function parse_vel_cmd(buf) {
     };
 }
 
+function send_occ_grid_from_update_to_clients(update_msg, prev_frame_og, header) {
+
+    // Used to see if we need to send the packet at all
+    const total_connections = wsockets.length + dt_sockets.length;
+
+    // We don't need to send the entire costmap every update - instead just send the size of the costmap and changes
+    // since the last update
+    let changes = [];
+    for (let y = 0; y < update_msg.height; ++y)
+    {
+        for (let x = 0; x < update_msg.width; ++x)
+        {
+            
+            if ('data' in prev_frame_og && 'info' in prev_frame_og && x < prev_frame_og.info.width && y < prev_frame_og.info.height)
+                prev_frame_og.data[x]
+        }
+    }
+
+    const frame_changes = get_occ_grid_delta(cur_occ_grid_msg.data, occ_data);
+
+    // Only create the packet and send it if there are clients connected
+    if (total_connections > 0) {
+        const packet_size = get_occgrid_packet_size(frame_changes);
+        const packet = new Buffer.alloc(packet_size);
+        add_occgrid_to_packet(cur_occ_grid_msg, frame_changes, header, packet, 0);
+        dlog(`Sending occ grid packet ${JSON.stringify(header)} (${packet.length}B or ${packet.length / MB_SIZE}MB) to ${total_connections} clients`);
+        send_packet_to_clients(packet);
+    }
+}
+
 function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg, header) {
 
     // Used to see if we need to send the packet at all
@@ -311,10 +341,9 @@ rosnodejs.initNode("/command_server")
         });
 
         // Subscribe to the occupancy grid map messages - send packet with the map info
-        ros_node.subscribe("/move_base/global_costmap/costmap_updates", "nav_msgs/OccupancyGrid",
+        ros_node.subscribe("/move_base/global_costmap/costmap_updates", "nav_msgs/OccupancyGridUpdate",
         (occ_grid_msg) => {
-            send_occ_grid_to_clients(occ_grid_msg, prev_frame_glob_cm_msg, glob_cm_header);
-            prev_frame_glob_cm_msg = occ_grid_msg;
+            send_occ_grid_from_update_to_clients(occ_grid_msg, prev_frame_glob_cm_msg, glob_cm_header);
         });
 
         // Subscribe to the transform topic - send packets for each transform
