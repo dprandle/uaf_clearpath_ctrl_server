@@ -35,7 +35,8 @@ function ilog(params) { info_print && console.log(params); }
 let pub = {};
 let static_tforms = {};
 let frame_tforms = {};
-let prev_frame_occ_grid_msg = [];
+let prev_frame_map_msg = [];
+let prev_frame_glob_cm_msg = [];
 
 function get_element_index(value, array) {
     return array.findIndex((element) => { return value === element });
@@ -66,8 +67,12 @@ const scan_packet_header = {
     type: "SCAN_PCKT_ID"
 };
 
-const occ_grid_header = {
-    type: "OC_GRID_PCKT_ID"
+const map_header = {
+    type: "MAP_PCKT_ID"
+};
+
+const glob_cm_header = {
+    type: "GLOB_CM_PCKT_ID"
 };
 
 const tform_pcket_header = {
@@ -116,10 +121,10 @@ function get_occgrid_packet_size(frame_changes) {
     return PACKET_STR_ID_LEN + 4 * 3 + 8 * 7 + 4 + frame_changes.length * 4;
 }
 
-function add_occgrid_to_packet(occ_grid_msg, frame_changes, packet, offset) {
+function add_occgrid_to_packet(occ_grid_msg, frame_changes, header, packet, offset) {
 
     // Map meta data
-    offset = write_packet_header(occ_grid_header, packet, offset);
+    offset = write_packet_header(header, packet, offset);
 
     offset = packet.writeFloatLE(occ_grid_msg.info.resolution, offset);
     offset = packet.writeUInt32LE(occ_grid_msg.info.width, offset);
@@ -143,14 +148,15 @@ function add_occgrid_to_packet(occ_grid_msg, frame_changes, packet, offset) {
     for (let i = 0; i < frame_changes.length; ++i) {
 
         console.assert((frame_changes[i].val < 16777216), "Changes array size is larger than allowed max");
+
         // Shift index to the left by one byte and use the LSByte for the likelihood value
         // Since this is javascript, gotta manually check for -1 and convert to 255 to keep it within a byte
         let byte_val = frame_changes[i].val;
         if (byte_val == -1)
             byte_val = 255;
 
-        let val = (frame_changes[i].ind << 8) + byte_val;
-        offset = packet.writeUInt32LE(val, offset);
+        let val = (frame_changes[i].ind << 8) | byte_val;
+        offset = packet.writeInt32LE(val, offset);
     }
     return offset;
 }
@@ -179,15 +185,17 @@ function parse_vel_cmd(buf) {
     };
 }
 
-function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg) {
+function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg, header) {
 
     // Used to see if we need to send the packet at all
     const total_connections = wsockets.length + dt_sockets.length;
 
     // If we haven't received any messages yet there will be no data member in prev_occ_grid_msg
     let occ_data = [];
-    if ('data' in prev_occ_grid_msg)
+    if ('data' in prev_occ_grid_msg && 'info' in prev_occ_grid_msg && prev_occ_grid_msg.info.width === cur_occ_grid_msg.info.width && prev_occ_grid_msg.info.height === cur_occ_grid_msg.info.height && prev_occ_grid_msg.info.resolution === cur_occ_grid_msg.info.resolution)
+    {
         occ_data = prev_occ_grid_msg.data;
+    }
 
     // We don't need to send the entire costmap every update - instead just send the size of the costmap and changes
     // since the last update    
@@ -197,20 +205,20 @@ function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg) {
     if (total_connections > 0) {
         const packet_size = get_occgrid_packet_size(frame_changes);
         const packet = new Buffer.alloc(packet_size);
-        add_occgrid_to_packet(cur_occ_grid_msg, frame_changes, packet, 0);
-        dlog(`Sending occ grid packet (${packet.length}B or ${packet.length / MB_SIZE}MB) to ${total_connections} clients`);
+        add_occgrid_to_packet(cur_occ_grid_msg, frame_changes, header, packet, 0);
+        dlog(`Sending occ grid packet ${JSON.stringify(header)} (${packet.length}B or ${packet.length / MB_SIZE}MB) to ${total_connections} clients`);
         send_packet_to_clients(packet);
     }
 }
 
 /// When a new connection is established
-function send_prev_occ_grid_to_new_client(occ_grid_msg, socket, func_to_use) {
+function send_prev_occ_grid_to_new_client(occ_grid_msg, header, socket, func_to_use) {
     if ('data' in occ_grid_msg) {
         const frame_all_changes = get_occ_grid_delta(occ_grid_msg.data, []);
         const packet_size = get_occgrid_packet_size(frame_all_changes);
         const packet = new Buffer.alloc(packet_size);
-        add_occgrid_to_packet(occ_grid_msg, frame_all_changes, packet, 0);
-        dlog(`Sending occ grid packet (${packet.length} bytes) to newly connected client`);
+        add_occgrid_to_packet(occ_grid_msg, frame_all_changes, header, packet, 0);
+        dlog(`Sending occ grid packet ${JSON.stringify(header)} (${packet.length} bytes) to newly connected client`);
         func_to_use(socket, packet);
     }
     else {
@@ -275,7 +283,6 @@ function get_transform_packet_size() {
 function get_transforms_packet_size(tforms) {
     return get_transform_packet_size() * Object.keys(tforms).length;
 }
-let every_other = true;
 
 function send_tforms(tforms) {
     const packet = new Buffer.alloc(get_transforms_packet_size(tforms));
@@ -292,9 +299,23 @@ rosnodejs.initNode("/command_server")
         // Subscribe to the occupancy grid map messages - send packet with the map info
         ros_node.subscribe("/map", "nav_msgs/OccupancyGrid",
             (occ_grid_msg) => {
-                send_occ_grid_to_clients(occ_grid_msg, prev_frame_occ_grid_msg);
-                prev_frame_occ_grid_msg = occ_grid_msg;
+                send_occ_grid_to_clients(occ_grid_msg, prev_frame_map_msg, map_header);
+                prev_frame_map_msg = occ_grid_msg;
             });
+
+        // Subscribe to the occupancy grid map messages - send packet with the map info
+        ros_node.subscribe("/move_base/global_costmap/costmap", "nav_msgs/OccupancyGrid",
+        (occ_grid_msg) => {
+            send_occ_grid_to_clients(occ_grid_msg, prev_frame_glob_cm_msg, glob_cm_header);
+            prev_frame_glob_cm_msg = occ_grid_msg;
+        });
+
+        // Subscribe to the occupancy grid map messages - send packet with the map info
+        ros_node.subscribe("/move_base/global_costmap/costmap_updates", "nav_msgs/OccupancyGrid",
+        (occ_grid_msg) => {
+            send_occ_grid_to_clients(occ_grid_msg, prev_frame_glob_cm_msg, glob_cm_header);
+            prev_frame_glob_cm_msg = occ_grid_msg;
+        });
 
         // Subscribe to the transform topic - send packets for each transform
         ros_node.subscribe("/tf", "tf2_msgs/TFMessage",
@@ -344,7 +365,8 @@ wss.on("connection", web_sckt => {
     });
 
     wsockets.push(web_sckt);
-    send_prev_occ_grid_to_new_client(prev_frame_occ_grid_msg, web_sckt, (sckt, pckt) => { sckt.send(pckt); });
+    send_prev_occ_grid_to_new_client(prev_frame_glob_cm_msg, glob_cm_header, web_sckt, (sckt, pckt) => { sckt.send(pckt); });
+    send_prev_occ_grid_to_new_client(prev_frame_map_msg, map_header, web_sckt, (sckt, pckt) => { sckt.send(pckt); });
     send_static_tforms_to_new_client(static_tforms, web_sckt, (sckt, pckt) => { sckt.send(pckt); });
     ilog(`New client connected for web sockets - ${wsockets.length} web sockets connected`);
 });
@@ -374,7 +396,8 @@ non_browser_server.on("connection", (dt_skt) => {
     });
 
     dt_sockets.push(dt_skt);
-    send_prev_occ_grid_to_new_client(prev_frame_occ_grid_msg, dt_skt, (sckt, pckt) => { sckt.write(pckt); });
+    send_prev_occ_grid_to_new_client(prev_frame_glob_cm_msg, glob_cm_header, dt_skt, (sckt, pckt) => { sckt.write(pckt); });
+    send_prev_occ_grid_to_new_client(prev_frame_map_msg, map_header, dt_skt, (sckt, pckt) => { sckt.write(pckt); });
     send_static_tforms_to_new_client(static_tforms, dt_skt, (sckt, pckt) => { sckt.write(pckt); });
     ilog(`Client connected from ${dt_skt.remoteAddress}:${dt_skt.remotePort} - ${dt_sockets.length} non ws clients connected`);
 });
