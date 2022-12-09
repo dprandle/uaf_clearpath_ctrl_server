@@ -2,8 +2,11 @@ const express = require('express');
 const path = require('path');
 const rosnodejs = require('rosnodejs');
 const geom_msgs = rosnodejs.require('geometry_msgs').msg;
+
 const wss_lib = require('ws');
 const http = require('http');
+const { spawn } = require("child_process");
+
 // const sensor_msgs = rosnodejs.require('sensor_msgs').msg;
 // const nav_msgs = rosnodejs.require('nav_msgs').msg;
 
@@ -33,11 +36,15 @@ function wlog(params) { warning_print && console.log(params); }
 function ilog(params) { info_print && console.log(params); }
 
 let cmd_vel_pub = {};
-let cmd_goal = {};
+let cmd_goal_pub = {};
+let clear_map_client = {};
+let cancel_goal_pub = {};
+
 let static_tforms = {};
 let frame_tforms = {};
-let prev_frame_map_msg = [];
-let prev_frame_glob_cm_msg = [];
+let prev_frame_map_msg = {};
+let prev_frame_glob_cm_msg = {};
+let current_goal_status_msg = {};
 
 function get_element_index(value, array) {
     return array.findIndex((element) => { return value === element });
@@ -84,6 +91,10 @@ const navp_pcket_header = {
     type: "NAVP_PCKT_ID"
 };
 
+const goal_status_pckt_header = {
+    type: "GOAL_STAT_PCKT_ID"
+};
+
 const vel_cmd_header = {
     type: "VEL_CMD_PCKT_ID"
 };
@@ -96,6 +107,9 @@ const stop_cmd_header = {
     type: "STOP_CMD_PCKT_ID"
 };
 
+const clear_maps_cmd_header = {
+    type: "CLEAR_MAPS_PCKT_ID"
+};
 
 function write_packet_string(str, len, packet, offset) {
     for (let i = 0; i < len; ++i) {
@@ -150,13 +164,13 @@ function get_changes_and_apply_update_to_occgrid(update_msg, prev_occ_grid) {
 }
 
 function get_occgrid_packet_size(frame_changes) {
-    // Packet size is header plus map meta data (3 4 byte values) plus the origin pos and orientation
+    // Packet size is header plus map meta data (3 4 byte values) plus the origin pos and orientation plus a reset flag
     // (total of 7 doubles which are each 8 bytes), a single 4 byte value for the length of the changes array,
     // and then the changes array where each entry is a 4 byte value - 3 MSB for the index and 1 LSB for the likelyhood value
-    return PACKET_STR_ID_LEN + 4 * 3 + 8 * 7 + 4 + frame_changes.length * 4;
+    return PACKET_STR_ID_LEN + 4 * 3 + 8 * 7 + 1 + 4 + frame_changes.length * 4;
 }
 
-function add_occgrid_to_packet(occ_grid_msg, frame_changes, header, packet, offset) {
+function add_occgrid_to_packet(occ_grid_msg, frame_changes, header, reset_map, packet, offset) {
 
     // Map meta data
     offset = write_packet_header(header, packet, offset);
@@ -175,6 +189,8 @@ function add_occgrid_to_packet(occ_grid_msg, frame_changes, header, packet, offs
     offset = packet.writeDoubleLE(occ_grid_msg.info.origin.orientation.y, offset);
     offset = packet.writeDoubleLE(occ_grid_msg.info.origin.orientation.z, offset);
     offset = packet.writeDoubleLE(occ_grid_msg.info.origin.orientation.w, offset);
+
+    offset = packet.writeInt8(reset_map, offset);
 
     // Length of changes array
     //dlog(`Sending frame_changes length ${frame_changes.length}`);
@@ -211,8 +227,7 @@ function add_scan_to_packet(scan, packet, offset) {
 function add_navp_to_packet(navmsg, packet, offset) {
     offset = write_packet_header(navp_pcket_header, packet, offset);
     offset = packet.writeUInt32LE(navmsg.poses.length, offset);
-    for (let i = 0; i < navmsg.poses.length; ++i)
-    {
+    for (let i = 0; i < navmsg.poses.length; ++i) {
         offset = packet.writeDoubleLE(navmsg.poses[i].pose.position.x, offset);
         offset = packet.writeDoubleLE(navmsg.poses[i].pose.position.y, offset);
         offset = packet.writeDoubleLE(navmsg.poses[i].pose.position.z, offset);
@@ -221,6 +236,41 @@ function add_navp_to_packet(navmsg, packet, offset) {
         offset = packet.writeDoubleLE(navmsg.poses[i].pose.orientation.z, offset);
         offset = packet.writeDoubleLE(navmsg.poses[i].pose.orientation.w, offset);
     }
+    return offset;
+}
+
+function add_goal_stat_to_packet(goal_stat_msg, packet, offset) {
+    let status = -1;
+
+    if ('cur_goal_stamp' in goal_stat_msg) {
+        for (let i = 0; i < goal_stat_msg.status_list.length; ++i) 
+        {
+            if (goal_stat_msg.cur_goal_stamp.secs === goal_stat_msg.status_list[i].goal_id.stamp.secs && goal_stat_msg.cur_goal_stamp.nsecs === goal_stat_msg.status_list[i].goal_id.stamp.nsecs)
+                status = goal_stat_msg.status_list[i].status;
+        }
+    }
+
+    offset = write_packet_header(goal_status_pckt_header, packet, offset);
+    offset = packet.writeInt32LE(status, offset);
+    let position = { x: 0, y: 0, z: 0 };
+    let orientation = { x: 0, y: 0, z: 0, w: 1 };
+
+    if ('cur_goal' in goal_stat_msg) {
+        position = goal_stat_msg.cur_goal.target_pose.pose.position;
+        orientation = goal_stat_msg.cur_goal.target_pose.pose.orientation;
+    }
+
+    // Pose position
+    offset = packet.writeDoubleLE(position.x, offset);
+    offset = packet.writeDoubleLE(position.y, offset);
+    offset = packet.writeDoubleLE(position.z, offset);
+
+    // Pose orientation
+    offset = packet.writeDoubleLE(orientation.x, offset);
+    offset = packet.writeDoubleLE(orientation.y, offset);
+    offset = packet.writeDoubleLE(orientation.z, offset);
+    offset = packet.writeDoubleLE(orientation.w, offset);
+
     return offset;
 }
 
@@ -239,15 +289,15 @@ function parse_vel_cmd(buf) {
 function parse_goal_cmd(buf) {
     let dbl_size = 8;
     let pos = {
-        x: buf.readDoubleLE(PACKET_STR_ID_LEN + dbl_size*0),
-        y: buf.readDoubleLE(PACKET_STR_ID_LEN + dbl_size*1),
-        z: buf.readDoubleLE(PACKET_STR_ID_LEN + dbl_size*2)
+        x: buf.readDoubleLE(PACKET_STR_ID_LEN + dbl_size * 0),
+        y: buf.readDoubleLE(PACKET_STR_ID_LEN + dbl_size * 1),
+        z: buf.readDoubleLE(PACKET_STR_ID_LEN + dbl_size * 2)
     };
     let orientation = {
-        x: buf.readDoubleLE(PACKET_STR_ID_LEN + dbl_size*3),
-        y: buf.readDoubleLE(PACKET_STR_ID_LEN + dbl_size*4),
-        z: buf.readDoubleLE(PACKET_STR_ID_LEN + dbl_size*5),
-        w: buf.readDoubleLE(PACKET_STR_ID_LEN + dbl_size*6),
+        x: buf.readDoubleLE(PACKET_STR_ID_LEN + dbl_size * 3),
+        y: buf.readDoubleLE(PACKET_STR_ID_LEN + dbl_size * 4),
+        z: buf.readDoubleLE(PACKET_STR_ID_LEN + dbl_size * 5),
+        w: buf.readDoubleLE(PACKET_STR_ID_LEN + dbl_size * 6),
     };
     return {
         pos: pos,
@@ -260,13 +310,18 @@ function send_occ_grid_from_update_to_clients(update_msg, prev_frame_og_msg, hea
     // Used to see if we need to send the packet at all
     const total_connections = wsockets.length + dt_sockets.length;
 
+    if (!('data' in prev_frame_og_msg)) {
+        console.log("Cannot send costmap update - haven't got original costmap yet");
+        return;
+    }
+
     const frame_changes = get_changes_and_apply_update_to_occgrid(update_msg, prev_frame_og_msg);
 
     // Only create the packet and send it if there are clients connected
     if (total_connections > 0) {
         const packet_size = get_occgrid_packet_size(frame_changes);
         const packet = new Buffer.alloc(packet_size);
-        add_occgrid_to_packet(prev_frame_og_msg, frame_changes, header, packet, 0);
+        add_occgrid_to_packet(prev_frame_og_msg, frame_changes, header, 0, packet, 0);
         //dlog(`Sending occ grid packet ${JSON.stringify(header)} (${packet.length}B or ${packet.length / MB_SIZE}MB) to ${total_connections} clients`);
         send_packet_to_clients(packet);
     }
@@ -278,9 +333,11 @@ function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg, header) {
     const total_connections = wsockets.length + dt_sockets.length;
 
     // If we haven't received any messages yet there will be no data member in prev_occ_grid_msg
+    let reset_map = 1;
     let occ_data = [];
     if ('data' in prev_occ_grid_msg && 'info' in prev_occ_grid_msg && prev_occ_grid_msg.info.width === cur_occ_grid_msg.info.width && prev_occ_grid_msg.info.height === cur_occ_grid_msg.info.height && prev_occ_grid_msg.info.resolution === cur_occ_grid_msg.info.resolution) {
         occ_data = prev_occ_grid_msg.data;
+        reset_map = 0;
     }
 
     // We don't need to send the entire costmap every update - instead just send the size of the costmap and changes
@@ -291,7 +348,7 @@ function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg, header) {
     if (total_connections > 0) {
         const packet_size = get_occgrid_packet_size(frame_changes);
         const packet = new Buffer.alloc(packet_size);
-        add_occgrid_to_packet(cur_occ_grid_msg, frame_changes, header, packet, 0);
+        add_occgrid_to_packet(cur_occ_grid_msg, frame_changes, header, reset_map, packet, 0);
         dlog(`Sending occ grid packet ${JSON.stringify(header)} (${packet.length}B or ${packet.length / MB_SIZE}MB) to ${total_connections} clients`);
         send_packet_to_clients(packet);
     }
@@ -303,7 +360,7 @@ function send_prev_occ_grid_to_new_client(occ_grid_msg, header, socket, func_to_
         const frame_all_changes = get_occ_grid_delta(occ_grid_msg.data, []);
         const packet_size = get_occgrid_packet_size(frame_all_changes);
         const packet = new Buffer.alloc(packet_size);
-        add_occgrid_to_packet(occ_grid_msg, frame_all_changes, header, packet, 0);
+        add_occgrid_to_packet(occ_grid_msg, frame_all_changes, header, 0, packet, 0);
         dlog(`Sending occ grid packet ${JSON.stringify(header)} (${packet.length} bytes) to newly connected client`);
         func_to_use(socket, packet);
     }
@@ -363,6 +420,12 @@ function get_navp_packet_size(navmsg) {
     return PACKET_STR_ID_LEN + 4 + navmsg.poses.length * 7 * 8;
 }
 
+function get_goal_status_packet_size() {
+    // Packet id str and then 4 bytes for the goal status, then 7 8-byte doubles for the pose
+    return PACKET_STR_ID_LEN + 4 + 7 * 8;
+}
+
+
 function get_scan_packet_size(scan_msg) {
     return PACKET_STR_ID_LEN + 20 + scan_msg.ranges.length * 4;
 }
@@ -381,9 +444,38 @@ function send_tforms(tforms) {
     send_packet_to_clients(packet);
 }
 
-// Create command server ROS node wich will relay our socket communications to control and monitor the robot
+function run_child_process(name, args) {
+    const proc = spawn(name, args);
+    // proc.stderr.on("data", data => {
+    //     console.log(`${name} stderr: ${data}`);
+    // });
+    proc.on('error', (error) => {
+        console.log(`${name} error: ${error.message}`);
+    });
+
+    proc.on("close", code => {
+        console.log(`${name} child process exited with code ${code}`);
+    });
+    return proc;
+}
+
+let gmapping_proc = {};
+let jackal_nav_proc = {};
+
+function run_gmapping() {
+    return run_child_process("rosrun", ["gmapping", "slam_gmapping", "scan:=front/scan", "_delta:=0.05", "_xmin:=-1", "_xmax:=1", "_ymin:=-1", "_ymax:=1"]);
+}
+
+function run_jackal_navigation() {
+    return run_child_process("roslaunch", ["jackal_navigation", "move_base.launch"]);
+}
+
+// Create command server ROS node wich will relay our socket communications to control and monitor the robotrosnodejs
 rosnodejs.initNode("/command_server")
     .then((ros_node) => {
+
+        gmapping_proc = run_gmapping();
+        jackal_nav_proc = run_jackal_navigation();
 
         setInterval(send_tforms, 30, frame_tforms);
 
@@ -418,7 +510,6 @@ rosnodejs.initNode("/command_server")
                 convert_tforms_key_val(tf_message, static_tforms);
             });
 
-        // Subscribe to the laser scan messages - send a packet with the scan info
         ros_node.subscribe("/move_base/NavfnROS/plan", "nav_msgs/Path",
             (navmsg) => {
                 const packet = new Buffer.alloc(get_navp_packet_size(navmsg));
@@ -428,39 +519,78 @@ rosnodejs.initNode("/command_server")
 
         // Subscribe to the laser scan messages - send a packet with the scan info
         ros_node.subscribe("/front/scan", "sensor_msgs/LaserScan",
-        (scan) => {
-            const packet = new Buffer.alloc(get_scan_packet_size(scan));
-            add_scan_to_packet(scan, packet, 0);
-            send_packet_to_clients(packet);
-        });
+            (scan) => {
+                const packet = new Buffer.alloc(get_scan_packet_size(scan));
+                add_scan_to_packet(scan, packet, 0);
+                send_packet_to_clients(packet);
+            });
+
+        ros_node.subscribe("/move_base/status", "actionlib_msgs/GoalStatusArray",
+            (status_msg) => {
+                current_goal_status_msg.status_list = status_msg.status_list;
+                const packet = new Buffer.alloc(get_goal_status_packet_size());
+                add_goal_stat_to_packet(current_goal_status_msg, packet, 0);
+                send_packet_to_clients(packet);
+            });
+
+        ros_node.subscribe("move_base/goal", "move_base_msgs/MoveBaseActionGoal",
+            (goal_msg) => {
+                current_goal_status_msg.cur_goal = goal_msg.goal;
+                current_goal_status_msg.cur_goal_stamp = goal_msg.header.stamp;
+            });
 
         cmd_vel_pub = rosnodejs.nh.advertise('/cmd_vel', 'geometry_msgs/Twist');
-        cmd_goal = rosnodejs.nh.advertise('/move_base_simple/goal', 'geometry_msgs/PoseStamped');
+        cmd_goal_pub = rosnodejs.nh.advertise('/move_base_simple/goal', 'geometry_msgs/PoseStamped');
+        cancel_goal_pub = rosnodejs.nh.advertise('/move_base/cancel', 'actionlib_msgs/GoalID');
+        clear_map_client = rosnodejs.nh.serviceClient('/move_base/clear_costmaps', 'std_srvs/Empty');
     });
+
+function parse_incoming_data(data) {
+    const hdr = parse_command_header(data);
+    if (hdr === vel_cmd_header.type) {
+        const vel_cmd = parse_vel_cmd(data);
+        const msg = new geom_msgs.Twist;
+        msg.linear.x = vel_cmd.linear * 1.4;
+        msg.angular.z = vel_cmd.angular * 1.4;
+        cmd_vel_pub.publish(msg);
+    }
+    else if (hdr === goal_cmd_header.type) {
+        const goal_cmd = parse_goal_cmd(data);
+        const msg = new geom_msgs.PoseStamped;
+        msg.pose.position = goal_cmd.pos;
+        msg.pose.orientation = goal_cmd.orient;
+        msg.header.frame_id = 'map';
+        console.log(`Got goal - msg: ${JSON.stringify(msg)}`);
+        cmd_goal_pub.publish(msg);
+    }
+    else if (hdr === stop_cmd_header.type) {
+        console.log(`Got stop command`);
+        if (!('status_list' in current_goal_status_msg)) {
+            console.log("No status list built received yet from ROS");
+            return;
+        }
+        for (let i = 0; i < current_goal_status_msg.status_list.length; ++i) {
+            if (current_goal_status_msg.status_list[i].status <= 1) {
+                cancel_goal_pub.publish(current_goal_status_msg.status_list[i].goal_id);
+            }
+        }
+    }
+    else if (hdr === clear_maps_cmd_header.type) {
+        console.log(`Got clear maps command`);
+        gmapping_proc.kill('SIGINT');
+        gmapping_proc = run_gmapping();
+        prev_frame_glob_cm_msg = {};
+        prev_frame_map_msg = {};
+        clear_map_client.call();
+    }
+}
+
 
 // Serve to browsers via websockets
 wss.on("connection", web_sckt => {
     // sending message
     web_sckt.on("message", data => {
-        const hdr = parse_command_header(data);
-        console.log(`Got header: ${JSON.stringify(hdr)}`)
-        if (hdr === vel_cmd_header.type) {
-            const vel_cmd = parse_vel_cmd(data);
-            const msg = new geom_msgs.Twist;
-            msg.linear.x = vel_cmd.linear;
-            msg.angular.z = vel_cmd.angular;
-            cmd_vel_pub.publish(msg);
-        }
-        else if (hdr === goal_cmd_header.type)
-        {
-            const goal_cmd = parse_goal_cmd(data);
-            const msg = new geom_msgs.PoseStamped;
-            msg.pose.position = goal_cmd.pos;
-            msg.pose.orientation = goal_cmd.orient;
-            msg.header.frame_id = "map";
-            console.log(`Got goal - msg: ${JSON.stringify(msg)}`);
-            cmd_goal.publish(msg);
-        }
+        parse_incoming_data(data);
     });
 
     // handling what to do when clients disconnects from server
@@ -481,28 +611,12 @@ wss.on("connection", web_sckt => {
     ilog(`New client connected for web sockets - ${wsockets.length} web sockets connected`);
 });
 
+
 // Serve to desktop/smartphone clients - these are not web sockets
 non_browser_server.on("connection", (dt_skt) => {
     // sending message
     dt_skt.on("data", data => {
-        const hdr = parse_command_header(data);
-        if (hdr === vel_cmd_header.type) {
-            const vel_cmd = parse_vel_cmd(data);
-            const msg = new geom_msgs.Twist;
-            msg.linear.x = vel_cmd.linear * 1.4;
-            msg.angular.z = vel_cmd.angular * 1.4;
-            cmd_vel_pub.publish(msg);
-        }
-        else if (hdr === goal_cmd_header.type)
-        {
-            const goal_cmd = parse_goal_cmd(data);
-            const msg = new geom_msgs.PoseStamped;
-            msg.pose.position = goal_cmd.pos;
-            msg.pose.orientation = goal_cmd.orient;
-            msg.header.frame_id = "map";
-            console.log(`Got goal - msg: ${JSON.stringify(msg)}`);
-            cmd_goal.publish(msg);
-        }
+        parse_incoming_data(data);
     });
 
     dt_skt.on("error", err => {
