@@ -462,6 +462,7 @@ function run_child_process(name, args) {
 let gmapping_proc = {};
 let jackal_nav_proc = {};
 
+
 function run_gmapping() {
     return run_child_process("rosrun", ["gmapping", "slam_gmapping", "scan:=front/scan", "_delta:=0.05", "_xmin:=-1", "_xmax:=1", "_ymin:=-1", "_ymax:=1"]);
 }
