@@ -7,9 +7,6 @@ const wss_lib = require('ws');
 const http = require('http');
 const { spawn } = require("child_process");
 
-// const sensor_msgs = rosnodejs.require('sensor_msgs').msg;
-// const nav_msgs = rosnodejs.require('nav_msgs').msg;
-
 const net = require('net');
 const { Buffer } = require('buffer');
 
@@ -110,6 +107,23 @@ const stop_cmd_header = {
 const clear_maps_cmd_header = {
     type: "CLEAR_MAPS_PCKT_ID"
 };
+
+const set_params_cmd_header = {
+    type: "SET_PARAMS_CMD_PCKT_ID"
+};
+
+const set_params_response_cmd_header = {
+    type: "SET_PARAMS_RESP_CMD_PCKT_ID"
+};
+
+const get_params_response_cmd_header = {
+    type: "GET_PARAMS_RESP_CMD_PCKT_ID"
+};
+
+const get_params_cmd_header = {
+    type: "GET_PARAMS_CMD_PCKT_ID"
+};
+
 
 function write_packet_string(str, len, packet, offset) {
     for (let i = 0; i < len; ++i) {
@@ -212,6 +226,13 @@ function add_occgrid_to_packet(occ_grid_msg, frame_changes, header, reset_map, p
     return offset;
 }
 
+function add_text_block_to_packet(text, packet, offset, header) {
+    offset = write_packet_header(header, packet, offset);
+    offset = packet.writeUInt32LE(text.length, offset);
+    offset = packet.write(text, offset, text.length);
+    return offset;
+}
+
 function add_scan_to_packet(scan, packet, offset) {
     offset = write_packet_header(scan_packet_header, packet, offset);
     offset = packet.writeFloatLE(scan.angle_min, offset);
@@ -243,8 +264,7 @@ function add_goal_stat_to_packet(goal_stat_msg, packet, offset) {
     let status = -1;
 
     if ('cur_goal_stamp' in goal_stat_msg) {
-        for (let i = 0; i < goal_stat_msg.status_list.length; ++i) 
-        {
+        for (let i = 0; i < goal_stat_msg.status_list.length; ++i) {
             if (goal_stat_msg.cur_goal_stamp.secs === goal_stat_msg.status_list[i].goal_id.stamp.secs && goal_stat_msg.cur_goal_stamp.nsecs === goal_stat_msg.status_list[i].goal_id.stamp.nsecs)
                 status = goal_stat_msg.status_list[i].status;
         }
@@ -286,6 +306,36 @@ function parse_vel_cmd(buf) {
     };
 }
 
+function recursively_apply_commands(cur_obj, parent_str_key, cmd_obj) {
+    for (const [key, value] of Object.entries(cur_obj)) {
+        const this_key = parent_str_key + key;
+        if (typeof value === 'object' && value !== null)
+            recursively_apply_commands(value, this_key + "/", cmd_obj);
+        else
+            cmd_obj[this_key] = value;
+    }
+}
+
+function parse_param_cmd(buf) {
+    let strlen = buf.readUInt32LE(PACKET_STR_ID_LEN);
+    let str = buf.toString('utf8', PACKET_STR_ID_LEN + 4, PACKET_STR_ID_LEN + 4 + strlen);
+    let ret = {};
+    let jsobj = {};
+    try {
+        jsobj = JSON.parse(str);
+    } catch (e) {
+        let text = `${str} is invalid JSON: ${e}`;
+        send_console_text_to_clients(text);
+        ilog(text);
+    }
+    for (const [key, value] of Object.entries(jsobj)) {
+        const cmd_obj = {}
+        recursively_apply_commands(value, "", cmd_obj);
+        ret[key] = cmd_obj;
+    }
+    return ret;
+}
+
 function parse_goal_cmd(buf) {
     let dbl_size = 8;
     let pos = {
@@ -311,7 +361,7 @@ function send_occ_grid_from_update_to_clients(update_msg, prev_frame_og_msg, hea
     const total_connections = wsockets.length + dt_sockets.length;
 
     if (!('data' in prev_frame_og_msg)) {
-        console.log("Cannot send costmap update - haven't got original costmap yet");
+        ilog("Cannot send costmap update - haven't got original costmap yet");
         return;
     }
 
@@ -438,23 +488,75 @@ function get_transforms_packet_size(tforms) {
     return get_transform_packet_size() * Object.keys(tforms).length;
 }
 
+function get_text_block_packet_size(text_to_send) {
+    return PACKET_STR_ID_LEN + 4 + text_to_send.length;
+}
+
 function send_tforms(tforms) {
     const packet = new Buffer.alloc(get_transforms_packet_size(tforms));
     add_transforms_to_packet(tforms, packet, 0);
     send_packet_to_clients(packet);
 }
 
-function run_child_process(name, args) {
+function send_text_packet_to_clients(text, header)
+{
+    let offset = 0;
+    let packet_size = get_text_block_packet_size(text);
+    const packet = new Buffer.alloc(packet_size);
+    add_text_block_to_packet(text, packet, offset, header);
+    send_packet_to_clients(packet);
+}
+
+function send_console_text_to_clients(text) {
+    send_text_packet_to_clients(text, set_params_response_cmd_header);
+}
+
+function send_param_get_text_to_clients(text) {
+    send_text_packet_to_clients(text, get_params_response_cmd_header);
+}
+
+let cur_param_proc = null;
+const param_stack = [];
+
+function run_child_process(name, args, send_err = false, send_output = false, send_success_confirm = false, success_confirm_text = '') {
     const proc = spawn(name, args);
-    // proc.stderr.on("data", data => {
-    //     console.log(`${name} stderr: ${data}`);
-    // });
+    if (send_err) {
+        proc.stderr.on("data", data => {
+            let txt = data.toString();
+            send_console_text_to_clients(txt);
+            ilog(`${name} stderr (sending to clients): ${txt}`);
+        });
+    }
+    if (send_output) {
+        proc.stdout.on("data", data => {
+            let txt = data.toString();
+            send_console_text_to_clients(txt);
+            ilog(`${name} stdout (sending to clients): ${txt}`);
+        });
+    }
     proc.on('error', (error) => {
-        console.log(`${name} error: ${error.message}`);
+        ilog(`${name} error: ${error.message}`);
     });
 
     proc.on("close", code => {
-        console.log(`${name} child process exited with code ${code}`);
+        if (send_success_confirm) {
+            let fmsg = ' succeeded';
+            if (code !== 0)
+                fmsg = ` failed with code ${code}`;
+            if ('timeout' in proc)
+                fmsg = ' failed - timeout';
+
+            let text = success_confirm_text + fmsg;
+            if (success_confirm_text.length === 0)
+                text = `Command ${name} with args ${JSON.stringify(args)} ${fmsg}`;
+
+            send_console_text_to_clients(text);
+        }
+        if (proc === cur_param_proc)
+        {
+            cur_param_proc = null;
+        }
+        //ilog(`${name} child process exited with code ${code}`);
     });
     return proc;
 }
@@ -462,7 +564,7 @@ function run_child_process(name, args) {
 let gmapping_proc = {};
 let jackal_nav_proc = {};
 
-
+//
 function run_gmapping() {
     return run_child_process("rosrun", ["gmapping", "slam_gmapping", "scan:=front/scan", "_delta:=0.05", "_xmin:=-1", "_xmax:=1", "_ymin:=-1", "_ymax:=1"]);
 }
@@ -470,6 +572,20 @@ function run_gmapping() {
 function run_jackal_navigation() {
     return run_child_process("roslaunch", ["jackal_navigation", "move_base.launch"]);
 }
+
+function update_param_check(cur_param_proc, pstack)
+{
+    if (!cur_param_proc && pstack.length !== 0)
+    {
+        const pobj = pstack.shift();
+        let msg = `Setting node ${pobj.node} parameter ${pobj.param_name} to ${JSON.stringify(pobj.param_val)}`;
+        cur_param_proc = run_child_process("rosrun", ["dynamic_reconfigure", "dynparam", "set", pobj.node, pobj.param_name, pobj.param_val], true, true, true, msg);
+        setTimeout(proc_timeout, 20000, cur_param_proc);
+        ilog(msg);
+    }
+}
+
+setInterval(send_tforms, 30, update_param_check);
 
 // Create command server ROS node wich will relay our socket communications to control and monitor the robotrosnodejs
 rosnodejs.initNode("/command_server")
@@ -479,6 +595,7 @@ rosnodejs.initNode("/command_server")
         jackal_nav_proc = run_jackal_navigation();
 
         setInterval(send_tforms, 30, frame_tforms);
+        setInterval(update_param_check, 30, cur_param_proc, param_stack);
 
         // Subscribe to the occupancy grid map messages - send packet with the map info
         ros_node.subscribe("/map", "nav_msgs/OccupancyGrid",
@@ -492,6 +609,7 @@ rosnodejs.initNode("/command_server")
             (occ_grid_msg) => {
                 send_occ_grid_to_clients(occ_grid_msg, prev_frame_glob_cm_msg, glob_cm_header);
                 prev_frame_glob_cm_msg = occ_grid_msg;
+                ilog("Got Costmap full update");
             });
 
         // Subscribe to the occupancy grid map messages - send packet with the map info
@@ -546,6 +664,13 @@ rosnodejs.initNode("/command_server")
         clear_map_client = rosnodejs.nh.serviceClient('/move_base/clear_costmaps', 'std_srvs/Empty');
     });
 
+function proc_timeout(proc) {
+    if (proc !== undefined) {
+        proc['timeout'] = true;
+        proc.kill('SIGINT');
+    }
+}
+
 function parse_incoming_data(data) {
     const hdr = parse_command_header(data);
     if (hdr === vel_cmd_header.type) {
@@ -561,13 +686,12 @@ function parse_incoming_data(data) {
         msg.pose.position = goal_cmd.pos;
         msg.pose.orientation = goal_cmd.orient;
         msg.header.frame_id = 'map';
-        console.log(`Got goal - msg: ${JSON.stringify(msg)}`);
         cmd_goal_pub.publish(msg);
     }
     else if (hdr === stop_cmd_header.type) {
-        console.log(`Got stop command`);
+        ilog(`Got stop command`);
         if (!('status_list' in current_goal_status_msg)) {
-            console.log("No status list built received yet from ROS");
+            ilog("No status list built received yet from ROS");
             return;
         }
         for (let i = 0; i < current_goal_status_msg.status_list.length; ++i) {
@@ -576,13 +700,85 @@ function parse_incoming_data(data) {
             }
         }
     }
+    else if (hdr == get_params_cmd_header.type) {
+        const proc = spawn("rosrun", ["dynamic_reconfigure", "dynparam", "list"]);
+
+        proc.stderr.on("data", data => {
+            const txt = data.toString();
+            ilog(`dynamic_reconfigure stderr (sending to clients): ${txt}`);
+        });
+
+        proc.stdout.on("data", data => {
+            const txt = data.toString();
+            arr = txt.split('\n');
+            const main_obj = {};
+
+            let request_count = 0;
+            for (let i = 0; i < arr.length; ++i) {
+                if (arr[i].length !== 0) {
+                    ++request_count;
+                    ilog(`Spawning child process for node ${arr[i]} (${request_count} requests)`);
+                    const pget_proc = spawn("rosrun", ["dynamic_reconfigure", "dynparam", "get", arr[i]]);
+                    const obj_key = arr[i].slice(1);
+
+                    pget_proc.stderr.on("data", data => {
+                        const txt = data.toString();
+                        ilog(`dynamic_reconfigure get ${arr[i]} stderr (sending to clients): ${txt}`);
+                    });
+
+                    pget_proc.on('error', (error) => {
+                        ilog(`dynamic_reconfigure get ${arr[i]} error: ${error.message}`);
+                    });
+            
+                    pget_proc.on("close", code => {
+                        --request_count;
+                        if (request_count == 0)
+                        {
+                            const txt_to_send = JSON.stringify(main_obj, null, 2);
+                            ilog(`Got final params for ${Object.keys(main_obj).length} nodes - sending to clients`);
+                            send_param_get_text_to_clients(txt_to_send);
+                        }
+                        ilog(`dynamic_reconfigure get ${arr[i]} child process exited with code ${code} (${request_count} requests remain)`);
+                    });
+
+                    pget_proc.stdout.on("data", data => {
+                        const txt = data.toString();
+                        const txt_swapped = txt.replace(/'/g, '"').replace(/True/g, 'true').replace(/False/g, 'false');
+                        main_obj[obj_key] = JSON.parse(txt_swapped);
+                        delete main_obj[obj_key]['groups'];
+                    });
+                }
+            }
+        });
+
+        proc.on('error', (error) => {
+            ilog(`dynamic_reconfigure error: ${error.message}`);
+        });
+
+        proc.on("close", code => {
+            ilog(`dynamic_reconfigure child process exited with code ${code}`);
+        });
+
+        setTimeout(proc_timeout, 3000, proc);
+    }
     else if (hdr === clear_maps_cmd_header.type) {
-        console.log(`Got clear maps command`);
+        ilog(`Got clear maps command`);
         gmapping_proc.kill('SIGINT');
-        gmapping_proc = run_gmapping();
+        jackal_nav_proc.kill('SIGINT');
         prev_frame_glob_cm_msg = {};
         prev_frame_map_msg = {};
         clear_map_client.call();
+        gmapping_proc = run_gmapping();
+        jackal_nav_proc = run_jackal_navigation();
+        send_console_text_to_clients("Restarted jackal_navigation and gmapping");
+    }
+    else if (hdr === set_params_cmd_header.type) {
+        let cmd_obj = parse_param_cmd(data);
+        for (const [node, params] of Object.entries(cmd_obj)) {
+            for (const [param_name, param_val] of Object.entries(params)) {
+                param_stack.push({'node': node, 'param_name': param_name, 'param_val': param_val});
+            }
+        }
     }
 }
 
