@@ -10,63 +10,38 @@ const { spawn } = require("child_process");
 const net = require('net');
 const { Buffer } = require('buffer');
 
-const wsockets = [];
-const dt_sockets = [];
-const desktop_server_port = 4000;
-const http_server_port = 8080;
-
 const app = express();
 const http_server = http.createServer(app);
 const non_browser_server = net.createServer();
 const wss = new wss_lib.Server({ noServer: true });
+
+const wsockets = [];
+const dt_sockets = [];
+const desktop_server_port = 4000;
+const http_server_port = 8080;
 
 const PACKET_STR_ID_LEN = 32;
 const TFORM_NODE_NAME_LEN = 32;
 const KB_SIZE = 1024;
 const MB_SIZE = 1024 * KB_SIZE;
 
-let debug_print = true;
-let warning_print = true;
-let info_print = true;
-function dlog(params) { debug_print && console.log(params); }
-function wlog(params) { warning_print && console.log(params); }
-function ilog(params) { info_print && console.log(params); }
-
 let cmd_vel_pub = {};
 let cmd_goal_pub = {};
 let clear_map_client = {};
 let cancel_goal_pub = {};
 
+let cur_loc_navp_sub = "/move_base/TrajectoryPlannerROS/local_plan";
+let cur_glob_navp_sub = "/move_base/NavfnROS/plan";
+
 let static_tforms = {};
 let frame_tforms = {};
 let prev_frame_map_msg = {};
 let prev_frame_glob_cm_msg = {};
+let prev_frame_loc_cm_msg = {};
 let current_goal_status_msg = {};
 
-function get_element_index(value, array) {
-    return array.findIndex((element) => { return value === element });
-}
-
-function remove_element_at_index(ind, array) {
-    const last_ind = array.length - 1;
-    if (ind < 0)
-        return;
-
-    if (ind !== last_ind)
-        array[ind] = array[last_ind];
-    array.pop();
-}
-
-function remove_socket_from_array(sckt, array) {
-    remove_element_at_index(get_element_index(sckt, array), array);
-}
-
-function send_packet_to_clients(packet) {
-    for (let i = 0; i < wsockets.length; ++i)
-        wsockets[i].send(packet, { binary: true });
-    for (let i = 0; i < dt_sockets.length; ++i)
-        dt_sockets[i].write(packet);
-}
+let gmapping_proc = {};
+let jackal_nav_proc = {};
 
 const scan_packet_header = {
     type: "SCAN_PCKT_ID"
@@ -74,6 +49,10 @@ const scan_packet_header = {
 
 const map_header = {
     type: "MAP_PCKT_ID"
+};
+
+const loc_cm_header = {
+    type: "LOC_CM_PCKT_ID"
 };
 
 const glob_cm_header = {
@@ -84,8 +63,12 @@ const tform_pcket_header = {
     type: "TFORM_PCKT_ID"
 };
 
-const navp_pcket_header = {
-    type: "NAVP_PCKT_ID"
+const loc_navp_pcket_header = {
+    type: "LOC_NAVP_PCKT_ID"
+};
+
+const glob_navp_pcket_header = {
+    type: "GLOB_NAVP_PCKT_ID"
 };
 
 const goal_status_pckt_header = {
@@ -125,6 +108,39 @@ const get_params_cmd_header = {
 };
 
 
+let debug_print = false;
+let warning_print = true;
+let info_print = true;
+
+function dlog(params) { debug_print && console.log(params); }
+function wlog(params) { warning_print && console.log(params); }
+function ilog(params) { info_print && console.log(params); }
+
+function get_element_index(value, array) {
+    return array.findIndex((element) => { return value === element });
+}
+
+function remove_element_at_index(ind, array) {
+    const last_ind = array.length - 1;
+    if (ind < 0)
+        return;
+
+    if (ind !== last_ind)
+        array[ind] = array[last_ind];
+    array.pop();
+}
+
+function remove_socket_from_array(sckt, array) {
+    remove_element_at_index(get_element_index(sckt, array), array);
+}
+
+function send_packet_to_clients(packet) {
+    for (let i = 0; i < wsockets.length; ++i)
+        wsockets[i].send(packet, { binary: true });
+    for (let i = 0; i < dt_sockets.length; ++i)
+        dt_sockets[i].write(packet);
+}
+
 function write_packet_string(str, len, packet, offset) {
     for (let i = 0; i < len; ++i) {
         if (i < str.length)
@@ -140,7 +156,10 @@ function write_packet_header(packet_header, packet, offset) {
 }
 
 function get_occ_grid_delta(cur_occ_grid, prev_occ_grid) {
-    dlog(`Occ grid cur size:${cur_occ_grid.length} prev size:${prev_occ_grid.length}`);
+    if (cur_occ_grid.length !== prev_occ_grid.length)
+    {
+        ilog(`Occ grid resized from ${prev_occ_grid.length} to ${cur_occ_grid.length}`);
+    }
     let changes = [];
     changes.length = 0;
     for (let i = 0; i < cur_occ_grid.length; ++i) {
@@ -245,8 +264,8 @@ function add_scan_to_packet(scan, packet, offset) {
     return offset;
 }
 
-function add_navp_to_packet(navmsg, packet, offset) {
-    offset = write_packet_header(navp_pcket_header, packet, offset);
+function add_navp_to_packet(navmsg, header, packet, offset) {
+    offset = write_packet_header(header, packet, offset);
     offset = packet.writeUInt32LE(navmsg.poses.length, offset);
     for (let i = 0; i < navmsg.poses.length; ++i) {
         offset = packet.writeDoubleLE(navmsg.poses[i].pose.position.x, offset);
@@ -372,7 +391,6 @@ function send_occ_grid_from_update_to_clients(update_msg, prev_frame_og_msg, hea
         const packet_size = get_occgrid_packet_size(frame_changes);
         const packet = new Buffer.alloc(packet_size);
         add_occgrid_to_packet(prev_frame_og_msg, frame_changes, header, 0, packet, 0);
-        //dlog(`Sending occ grid packet ${JSON.stringify(header)} (${packet.length}B or ${packet.length / MB_SIZE}MB) to ${total_connections} clients`);
         send_packet_to_clients(packet);
     }
 }
@@ -552,19 +570,60 @@ function run_child_process(name, args, send_err = false, send_output = false, se
 
             send_console_text_to_clients(text);
         }
+
         if (proc === cur_param_proc)
         {
+            ilog("Setting cur param proc to null");
             cur_param_proc = null;
         }
-        //ilog(`${name} child process exited with code ${code}`);
+
+        ilog(`Args length: ${args.length}`);
+        if (args.length >= 6)
+        {
+            ilog(`Args[4] = ${args[4]}`);
+            if (args[4] === "base_local_planner")
+            {
+                const new_topic = "/move_base/" + args[5].split("/").pop() + "/local_plan";
+                const msg = `Unsubscribing from ${cur_loc_navp_sub} and subscribing to ${new_topic}`;
+                send_console_text_to_clients(msg);
+                ilog(msg);
+
+                rosnodejs.nh.unsubscribe(cur_loc_navp_sub);
+                cur_loc_navp_sub = new_topic;
+                rosnodejs.nh.subscribe(cur_loc_navp_sub, "nav_msgs/Path", on_local_navp_msg);
+            }
+            else if (args[4] === "base_global_planner")
+            {
+                const new_topic = "/move_base/" + args[5].split("/").pop() + "/plan";
+                const msg = `Unsubscribing from ${cur_glob_navp_sub} and subscribing to ${new_topic}`;
+                send_console_text_to_clients(msg);
+                ilog(msg);
+
+                rosnodejs.nh.unsubscribe(cur_glob_navp_sub);
+                cur_glob_navp_sub = new_topic;
+                rosnodejs.nh.subscribe(cur_glob_navp_sub, "nav_msgs/Path", on_global_navp_msg);
+            }
+        }
+
+        dlog(`${name} child process exited with code ${code}`);
     });
     return proc;
 }
 
-let gmapping_proc = {};
-let jackal_nav_proc = {};
+function on_global_navp_msg(navmsg)
+{
+    const packet = new Buffer.alloc(get_navp_packet_size(navmsg));
+    add_navp_to_packet(navmsg, glob_navp_pcket_header, packet, 0);
+    send_packet_to_clients(packet);
+}
 
-//
+function on_local_navp_msg(navmsg)
+{
+    const packet = new Buffer.alloc(get_navp_packet_size(navmsg));
+    add_navp_to_packet(navmsg, loc_navp_pcket_header, packet, 0);
+    send_packet_to_clients(packet);    
+}
+
 function run_gmapping() {
     return run_child_process("rosrun", ["gmapping", "slam_gmapping", "scan:=front/scan", "_delta:=0.05", "_xmin:=-1", "_xmax:=1", "_ymin:=-1", "_ymax:=1"]);
 }
@@ -584,8 +643,6 @@ function update_param_check(cur_param_proc, pstack)
         ilog(msg);
     }
 }
-
-setInterval(send_tforms, 30, update_param_check);
 
 // Create command server ROS node wich will relay our socket communications to control and monitor the robotrosnodejs
 rosnodejs.initNode("/command_server")
@@ -609,13 +666,20 @@ rosnodejs.initNode("/command_server")
             (occ_grid_msg) => {
                 send_occ_grid_to_clients(occ_grid_msg, prev_frame_glob_cm_msg, glob_cm_header);
                 prev_frame_glob_cm_msg = occ_grid_msg;
-                ilog("Got Costmap full update");
+                ilog("Global costmap full update");
             });
 
         // Subscribe to the occupancy grid map messages - send packet with the map info
         ros_node.subscribe("/move_base/global_costmap/costmap_updates", "map_msgs/OccupancyGridUpdate",
             (occ_grid_msg) => {
                 send_occ_grid_from_update_to_clients(occ_grid_msg, prev_frame_glob_cm_msg, glob_cm_header);
+            });
+
+        // Subscribe to the occupancy grid map messages - send packet with the map info
+        ros_node.subscribe("/move_base/local_costmap/costmap", "nav_msgs/OccupancyGrid",
+            (occ_grid_msg) => {
+                send_occ_grid_to_clients(occ_grid_msg, prev_frame_loc_cm_msg, loc_cm_header);
+                prev_frame_loc_cm_msg = occ_grid_msg;
             });
 
         // Subscribe to the transform topic - send packets for each transform
@@ -629,12 +693,9 @@ rosnodejs.initNode("/command_server")
                 convert_tforms_key_val(tf_message, static_tforms);
             });
 
-        ros_node.subscribe("/move_base/NavfnROS/plan", "nav_msgs/Path",
-            (navmsg) => {
-                const packet = new Buffer.alloc(get_navp_packet_size(navmsg));
-                add_navp_to_packet(navmsg, packet, 0);
-                send_packet_to_clients(packet);
-            });
+        ros_node.subscribe(cur_glob_navp_sub, "nav_msgs/Path", on_global_navp_msg);
+
+        ros_node.subscribe(cur_loc_navp_sub, "nav_msgs/Path", on_local_navp_msg);
 
         // Subscribe to the laser scan messages - send a packet with the scan info
         ros_node.subscribe("/front/scan", "sensor_msgs/LaserScan",
