@@ -41,7 +41,6 @@ let prev_frame_loc_cm_msg = {};
 let current_goal_status_msg = {};
 
 let gmapping_proc = {};
-let jackal_nav_proc = {};
 
 const scan_packet_header = {
     type: "SCAN_PCKT_ID"
@@ -442,6 +441,9 @@ function add_transform_to_packet(tf, packet, offset) {
     offset = write_packet_string(tf.header.frame_id, TFORM_NODE_NAME_LEN, packet, offset);
     offset = write_packet_string(tf.child_frame_id, TFORM_NODE_NAME_LEN, packet, offset);
 
+    // Connection count
+    offset = packet.writeInt8(wsockets.length + dt_sockets.length, offset);
+
     // Transform position
     offset = packet.writeDoubleLE(tf.transform.translation.x, offset);
     offset = packet.writeDoubleLE(tf.transform.translation.y, offset);
@@ -499,7 +501,7 @@ function get_scan_packet_size(scan_msg) {
 }
 
 function get_transform_packet_size() {
-    return PACKET_STR_ID_LEN + 32 + 32 + 8 * 3 + 8 * 4;
+    return PACKET_STR_ID_LEN + 32 + 32 + 1 + 8 * 3 + 8 * 4;
 }
 
 function get_transforms_packet_size(tforms) {
@@ -825,13 +827,13 @@ function parse_incoming_data(data) {
     else if (hdr === clear_maps_cmd_header.type) {
         ilog(`Got clear maps command`);
         gmapping_proc.kill('SIGINT');
-        jackal_nav_proc.kill('SIGINT');
+        // jackal_nav_proc.kill('SIGINT');
         prev_frame_glob_cm_msg = {};
         prev_frame_map_msg = {};
         clear_map_client.call();
         gmapping_proc = run_gmapping();
-        jackal_nav_proc = run_jackal_navigation();
-        send_console_text_to_clients("Restarted jackal_navigation and gmapping");
+        // jackal_nav_proc = run_jackal_navigation();
+        send_console_text_to_clients("Cleared costmaps and restarted gmapping");
     }
     else if (hdr === set_params_cmd_header.type) {
         let cmd_obj = parse_param_cmd(data);
@@ -904,6 +906,11 @@ non_browser_server.on("listening", () => {
 
 // Serve up the emscripten generated main page
 app.get('/', function (req, res) {
+    res.sendFile(path.join(__dirname, 'emscripten', 'jackal_ctrl.html'));
+});
+
+// Serve up the emscripten generated main page
+app.get('/control', function (req, res) {
     res.sendFile(path.join(__dirname, 'emscripten', 'jackal_ctrl.html'));
 });
 
