@@ -283,7 +283,7 @@ function add_goal_stat_to_packet(goal_stat_msg, packet, offset) {
 
     if ('cur_goal_stamp' in goal_stat_msg) {
         for (let i = 0; i < goal_stat_msg.status_list.length; ++i) {
-            if (goal_stat_msg.cur_goal_stamp.secs === goal_stat_msg.status_list[i].goal_id.stamp.secs && goal_stat_msg.cur_goal_stamp.nsecs === goal_stat_msg.status_list[i].goal_id.stamp.nsecs)
+            if (goal_stat_msg.cur_goal_stamp.secs === goal_stat_msg.status_list[i].goal_id.stamp.secs)
                 status = goal_stat_msg.status_list[i].status;
         }
     }
@@ -764,12 +764,12 @@ function parse_incoming_data(data) {
         }
         for (let i = 0; i < current_goal_status_msg.status_list.length; ++i) {
             if (current_goal_status_msg.status_list[i].status <= 1) {
+                const navmsg = {poses : []};
+                on_global_navp_msg(navmsg);
+                on_local_navp_msg(navmsg);
                 cancel_goal_pub.publish(current_goal_status_msg.status_list[i].goal_id);
             }
         }
-        const navmsg = {poses : []};
-        on_global_navp_msg(navmsg);
-        on_local_navp_msg(navmsg);
     }
     else if (hdr == get_params_cmd_header.type) {
         const proc = spawn("rosrun", ["dynamic_reconfigure", "dynparam", "list"]);
