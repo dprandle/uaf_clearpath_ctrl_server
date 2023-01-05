@@ -337,8 +337,13 @@ function recursively_apply_commands(cur_obj, parent_str_key, cmd_obj) {
 function parse_param_cmd(buf) {
     let strlen = buf.readUInt32LE(PACKET_STR_ID_LEN);
     let str = buf.toString('utf8', PACKET_STR_ID_LEN + 4, PACKET_STR_ID_LEN + 4 + strlen);
-    let ret = {};
+    let ret = null;
     let jsobj = {};
+    if (strlen > 0 && str[0] !== '{')
+    {
+        send_console_text_to_clients("msg: " + str);
+        return;
+    }
     try {
         jsobj = JSON.parse(str);
     } catch (e) {
@@ -837,9 +842,12 @@ function parse_incoming_data(data) {
     }
     else if (hdr === set_params_cmd_header.type) {
         let cmd_obj = parse_param_cmd(data);
-        for (const [node, params] of Object.entries(cmd_obj)) {
-            for (const [param_name, param_val] of Object.entries(params)) {
-                param_stack.push({'node': node, 'param_name': param_name, 'param_val': param_val});
+        if (cmd_obj)
+        {
+            for (const [node, params] of Object.entries(cmd_obj)) {
+                for (const [param_name, param_val] of Object.entries(params)) {
+                    param_stack.push({'node': node, 'param_name': param_name, 'param_val': param_val});
+                }
             }
         }
     }
