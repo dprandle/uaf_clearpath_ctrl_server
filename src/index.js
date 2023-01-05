@@ -765,11 +765,11 @@ function parse_incoming_data(data) {
         for (let i = 0; i < current_goal_status_msg.status_list.length; ++i) {
             if (current_goal_status_msg.status_list[i].status <= 1) {
                 cancel_goal_pub.publish(current_goal_status_msg.status_list[i].goal_id);
-                const navmsg = {poses : []};
-                on_global_navp_msg(navmsg);
-                on_local_navp_msg(navmsg);
             }
         }
+        const navmsg = {poses : []};
+        on_global_navp_msg(navmsg);
+        on_local_navp_msg(navmsg);
     }
     else if (hdr == get_params_cmd_header.type) {
         const proc = spawn("rosrun", ["dynamic_reconfigure", "dynparam", "list"]);
