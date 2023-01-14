@@ -4,6 +4,7 @@ const rosnodejs = require('rosnodejs');
 const geom_msgs = rosnodejs.require('geometry_msgs').msg;
 
 const wss_lib = require('ws');
+const os = require('os');
 const http = require('http');
 const { spawn } = require("child_process");
 
