@@ -639,16 +639,6 @@ function run_jackal_navigation() {
     return run_child_process("roslaunch", ["jackal_navigation", "move_base.launch"]);
 }
 
-//ROS_NAMESPACE=camera rosrun stereo_image_proc stereo_image_proc
-function run_stereo_image_proc() {
-    return run_child_process("ROS_NAMESPACE=camera rosrun", ["stereo_image_proc", "stereo_image_proc"]);
-}
-
-//rosrun image_transport republish raw in:=camera/left/image_color out:=camera/left/image_color
-function run_compressed_image_transport() {
-    return run_child_process("rosrun", ["image_transport", "republish", "raw", "in:=camera/left/image_color", "out:=camera/left/image_color"]);
-}
-
 function update_param_check(cur_param_proc, pstack) {
     if (!cur_param_proc && pstack.length !== 0) {
         const pobj = pstack.shift();
@@ -665,8 +655,6 @@ rosnodejs.initNode("/command_server")
 
         gmapping_proc = run_gmapping();
         run_jackal_navigation();
-        run_stereo_image_proc();
-        run_compressed_image_transport();
 
         setInterval(send_tforms, 30, frame_tforms);
         setInterval(update_param_check, 30, cur_param_proc, param_stack);
@@ -710,7 +698,7 @@ rosnodejs.initNode("/command_server")
             ilog("Subscribing to /camera/left/image_color/compressed")
             ros_node.subscribe("/camera/left/image_color/compressed", "sensor_msgs/CompressedImage",
                 (comp_image) => {
-                    ilog(`Got compressed image of format ${comp_image.format} and with data size ${comp_image.data.length}`);
+                    
                 });
         }
 
@@ -853,12 +841,10 @@ function parse_incoming_data(data) {
     else if (hdr === clear_maps_cmd_header.type) {
         ilog(`Got clear maps command`);
         gmapping_proc.kill('SIGINT');
-        // jackal_nav_proc.kill('SIGINT');
         prev_frame_glob_cm_msg = {};
         prev_frame_map_msg = {};
         clear_map_client.call();
         gmapping_proc = run_gmapping();
-        // jackal_nav_proc = run_jackal_navigation();
         send_console_text_to_clients("Cleared costmaps and restarted gmapping");
     }
     else if (hdr === set_params_cmd_header.type) {
