@@ -24,6 +24,11 @@ const PACKET_STR_ID_LEN = 32;
 const TFORM_NODE_NAME_LEN = 32;
 const KB_SIZE = 1024;
 const MB_SIZE = 1024 * KB_SIZE;
+const JACKAL_HOSTNAME = "cpr-uaf01";
+const HUSKY_HOSTNAME = "cpr-uaf02-husky";
+const ROBOT_HOSTNAME = os.hostname();
+const IS_JACKAL = (ROBOT_HOSTNAME === JACKAL_HOSTNAME);
+const IS_HUSKY = (ROBOT_HOSTNAME === HUSKY_HOSTNAME);
 
 let cmd_vel_pub = {};
 let cmd_goal_pub = {};
@@ -40,7 +45,6 @@ let prev_frame_glob_cm_msg = {};
 let prev_frame_loc_cm_msg = {};
 let current_goal_status_msg = {};
 
-let gmapping_proc = {};
 
 const scan_packet_header = {
     type: "SCAN_PCKT_ID"
@@ -161,8 +165,7 @@ function write_packet_header(packet_header, packet, offset) {
 // We don't need to send the entire costmap every update - instead just send the size of the costmap and changes
 // since the last update
 function get_occ_grid_delta(cur_occ_grid, prev_occ_grid) {
-    if (cur_occ_grid.length !== prev_occ_grid.length)
-    {
+    if (cur_occ_grid.length !== prev_occ_grid.length) {
         ilog(`Occ grid resized from ${prev_occ_grid.length} to ${cur_occ_grid.length}`);
     }
     let changes = [];
@@ -343,8 +346,7 @@ function parse_param_cmd(buf) {
     let str = buf.toString('utf8', PACKET_STR_ID_LEN + 4, PACKET_STR_ID_LEN + 4 + strlen);
     let ret = {};
     let jsobj = {};
-    if (strlen > 0 && str[0] !== '{')
-    {
+    if (strlen > 0 && str[0] !== '{') {
         send_console_text_to_clients("msg: " + str);
         return;
     }
@@ -527,8 +529,7 @@ function send_tforms(tforms) {
     send_packet_to_clients(packet);
 }
 
-function send_text_packet_to_clients(text, header)
-{
+function send_text_packet_to_clients(text, header) {
     let offset = 0;
     let packet_size = get_text_block_packet_size(text);
     const packet = new Buffer.alloc(packet_size);
@@ -582,18 +583,15 @@ function run_child_process(name, args, send_err = false, send_output = false, se
             send_console_text_to_clients(text);
         }
 
-        if (proc === cur_param_proc)
-        {
+        if (proc === cur_param_proc) {
             ilog("Setting cur param proc to null");
             cur_param_proc = null;
         }
 
         ilog(`Args length: ${args.length}`);
-        if (args.length >= 6)
-        {
+        if (args.length >= 6) {
             ilog(`Args[4] = ${args[4]}`);
-            if (args[4] === "base_local_planner")
-            {
+            if (args[4] === "base_local_planner") {
                 const new_topic = "/move_base/" + args[5].split("/").pop() + "/local_plan";
                 const msg = `Unsubscribing from ${cur_loc_navp_sub} and subscribing to ${new_topic}`;
                 send_console_text_to_clients(msg);
@@ -603,8 +601,7 @@ function run_child_process(name, args, send_err = false, send_output = false, se
                 cur_loc_navp_sub = new_topic;
                 rosnodejs.nh.subscribe(cur_loc_navp_sub, "nav_msgs/Path", on_local_navp_msg);
             }
-            else if (args[4] === "base_global_planner")
-            {
+            else if (args[4] === "base_global_planner") {
                 const new_topic = "/move_base/" + args[5].split("/").pop() + "/plan";
                 const msg = `Unsubscribing from ${cur_glob_navp_sub} and subscribing to ${new_topic}`;
                 send_console_text_to_clients(msg);
@@ -621,18 +618,16 @@ function run_child_process(name, args, send_err = false, send_output = false, se
     return proc;
 }
 
-function on_global_navp_msg(navmsg)
-{
+function on_global_navp_msg(navmsg) {
     const packet = new Buffer.alloc(get_navp_packet_size(navmsg));
     add_navp_to_packet(navmsg, glob_navp_pcket_header, packet, 0);
     send_packet_to_clients(packet);
 }
 
-function on_local_navp_msg(navmsg)
-{
+function on_local_navp_msg(navmsg) {
     const packet = new Buffer.alloc(get_navp_packet_size(navmsg));
     add_navp_to_packet(navmsg, loc_navp_pcket_header, packet, 0);
-    send_packet_to_clients(packet);    
+    send_packet_to_clients(packet);
 }
 
 function run_gmapping() {
@@ -650,13 +645,11 @@ function run_stereo_image_proc() {
 
 //rosrun image_transport republish raw in:=camera/left/image_color out:=camera/left/image_color
 function run_compressed_image_transport() {
-    return run_child_process("rosrun", ["image_transport", "republish", "raw", "in:=camera/left/image_color" ,"out:=camera/left/image_color"]);
+    return run_child_process("rosrun", ["image_transport", "republish", "raw", "in:=camera/left/image_color", "out:=camera/left/image_color"]);
 }
 
-function update_param_check(cur_param_proc, pstack)
-{
-    if (!cur_param_proc && pstack.length !== 0)
-    {
+function update_param_check(cur_param_proc, pstack) {
+    if (!cur_param_proc && pstack.length !== 0) {
         const pobj = pstack.shift();
         let msg = `Setting node ${pobj.node} parameter ${pobj.param_name} to ${JSON.stringify(pobj.param_val)}`;
         cur_param_proc = run_child_process("rosrun", ["dynamic_reconfigure", "dynparam", "set", pobj.node, pobj.param_name, pobj.param_val], true, true, true, msg);
@@ -710,6 +703,15 @@ rosnodejs.initNode("/command_server")
             (tf_message) => {
                 convert_tforms_key_val(tf_message, frame_tforms);
             });
+
+        // Subscribe to the color compressed image topic if jackal - left is chose arbitrarily
+        if (IS_JACKAL) {
+            ilog("Subscribing to /camera/left/image_color/compressed")
+            ros_node.subscribe("/camera/left/image_color/compressed", "sensor_msgs/CompressedImage",
+                (comp_image) => {
+                    ilog(`Got compressed image of format ${comp_image.format} and with data size ${comp_image.data.length}`);
+                });
+        }
 
         ros_node.subscribe("/tf_static", "tf2_msgs/TFMessage",
             (tf_message) => {
@@ -780,7 +782,7 @@ function parse_incoming_data(data) {
         }
         for (let i = 0; i < current_goal_status_msg.status_list.length; ++i) {
             if (current_goal_status_msg.status_list[i].status <= 1) {
-                const navmsg = {poses : []};
+                const navmsg = { poses: [] };
                 on_global_navp_msg(navmsg);
                 on_local_navp_msg(navmsg);
                 cancel_goal_pub.publish(current_goal_status_msg.status_list[i].goal_id);
@@ -816,11 +818,10 @@ function parse_incoming_data(data) {
                     pget_proc.on('error', (error) => {
                         ilog(`dynamic_reconfigure get ${arr[i]} error: ${error.message}`);
                     });
-            
+
                     pget_proc.on("close", code => {
                         --request_count;
-                        if (request_count == 0)
-                        {
+                        if (request_count == 0) {
                             const txt_to_send = JSON.stringify(main_obj, null, 2);
                             ilog(`Got final params for ${Object.keys(main_obj).length} nodes - sending to clients`);
                             send_param_get_text_to_clients(txt_to_send);
@@ -861,11 +862,10 @@ function parse_incoming_data(data) {
     }
     else if (hdr === set_params_cmd_header.type) {
         let cmd_obj = parse_param_cmd(data);
-        if (Object.keys(cmd_obj).length !== 0)
-        {
+        if (Object.keys(cmd_obj).length !== 0) {
             for (const [node, params] of Object.entries(cmd_obj)) {
                 for (const [param_name, param_val] of Object.entries(params)) {
-                    param_stack.push({'node': node, 'param_name': param_name, 'param_val': param_val});
+                    param_stack.push({ 'node': node, 'param_name': param_name, 'param_val': param_val });
                 }
             }
         }
