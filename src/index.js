@@ -106,6 +106,10 @@ const get_params_cmd_header = {
     type: "GET_PARAMS_CMD_PCKT_ID"
 };
 
+const comp_img_pckt_id = {
+    type: "COMP_IMG_PCKT_ID"
+}
+
 
 let debug_print = false;
 let warning_print = true;
@@ -154,6 +158,8 @@ function write_packet_header(packet_header, packet, offset) {
     return write_packet_string(packet_header.type, PACKET_STR_ID_LEN, packet, offset);
 }
 
+// We don't need to send the entire costmap every update - instead just send the size of the costmap and changes
+// since the last update
 function get_occ_grid_delta(cur_occ_grid, prev_occ_grid) {
     if (cur_occ_grid.length !== prev_occ_grid.length)
     {
@@ -173,10 +179,8 @@ function get_occ_grid_delta(cur_occ_grid, prev_occ_grid) {
     return changes;
 }
 
+// Sometimes ROS sends costmap updates for us - in this case we need to apply the updates to our stored costmap
 function get_changes_and_apply_update_to_occgrid(update_msg, prev_occ_grid) {
-
-    // We don't need to send the entire costmap every update - instead just send the size of the costmap and changes
-    // since the last update
     let changes = [];
     for (let y = 0; y < update_msg.height; ++y) {
         for (let x = 0; x < update_msg.width; ++x) {
@@ -337,7 +341,7 @@ function recursively_apply_commands(cur_obj, parent_str_key, cmd_obj) {
 function parse_param_cmd(buf) {
     let strlen = buf.readUInt32LE(PACKET_STR_ID_LEN);
     let str = buf.toString('utf8', PACKET_STR_ID_LEN + 4, PACKET_STR_ID_LEN + 4 + strlen);
-    let ret = null;
+    let ret = {};
     let jsobj = {};
     if (strlen > 0 && str[0] !== '{')
     {
@@ -639,6 +643,16 @@ function run_jackal_navigation() {
     return run_child_process("roslaunch", ["jackal_navigation", "move_base.launch"]);
 }
 
+//ROS_NAMESPACE=camera rosrun stereo_image_proc stereo_image_proc
+function run_stereo_image_proc() {
+    return run_child_process("ROS_NAMESPACE=camera rosrun", ["stereo_image_proc", "stereo_image_proc"]);
+}
+
+//rosrun image_transport republish raw in:=camera/left/image_color out:=camera/left/image_color
+function run_compressed_image_transport() {
+    return run_child_process("rosrun", ["image_transport", "republish", "raw", "in:=camera/left/image_color" ,"out:=camera/left/image_color"]);
+}
+
 function update_param_check(cur_param_proc, pstack)
 {
     if (!cur_param_proc && pstack.length !== 0)
@@ -656,7 +670,9 @@ rosnodejs.initNode("/command_server")
     .then((ros_node) => {
 
         gmapping_proc = run_gmapping();
-        jackal_nav_proc = run_jackal_navigation();
+        run_jackal_navigation();
+        run_stereo_image_proc();
+        run_compressed_image_transport();
 
         setInterval(send_tforms, 30, frame_tforms);
         setInterval(update_param_check, 30, cur_param_proc, param_stack);
@@ -845,7 +861,7 @@ function parse_incoming_data(data) {
     }
     else if (hdr === set_params_cmd_header.type) {
         let cmd_obj = parse_param_cmd(data);
-        if (cmd_obj)
+        if (Object.keys(cmd_obj).length !== 0)
         {
             for (const [node, params] of Object.entries(cmd_obj)) {
                 for (const [param_name, param_val] of Object.entries(params)) {
