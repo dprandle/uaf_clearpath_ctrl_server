@@ -210,6 +210,11 @@ function get_occgrid_packet_size(frame_changes) {
     return PACKET_STR_ID_LEN + 4 * 3 + 8 * 7 + 1 + 4 + frame_changes.length * 4;
 }
 
+function get_compressed_image_packet_size(comp_image_msg) {
+    /// Header bytes plus one byte for format, four bytes for data size, and however many bytes are in the data
+    return PACKET_STR_ID_LEN + 1 + 4 + comp_image_msg.data.length;
+}
+
 function add_occgrid_to_packet(occ_grid_msg, frame_changes, header, reset_map, packet, offset) {
 
     // Map meta data
@@ -268,6 +273,15 @@ function add_scan_to_packet(scan, packet, offset) {
     offset = packet.writeFloatLE(scan.range_max, offset);
     for (let i = 0; i < scan.ranges.length; ++i)
         offset = packet.writeFloatLE(scan.ranges[i], offset);
+    return offset;
+}
+
+function add_compressed_image_to_packet(compressed_image_msg, packet, offset) {
+    offset = write_packet_header(comp_img_pckt_id, packet, offset);
+    offset = packet.writeInt8(1, offset);
+    offset = packet.writeUInt32LE(compressed_image_msg.data.length, offset);
+    for (let i = 0; i < compressed_image_msg.data.length; ++i)
+        offset = packet.writeInt8(compressed_image_msg.data[i], offset);
     return offset;
 }
 
@@ -698,7 +712,9 @@ rosnodejs.initNode("/command_server")
             ilog("Subscribing to /camera/left/image_color/compressed")
             ros_node.subscribe("/camera/left/image_color/compressed", "sensor_msgs/CompressedImage",
                 (comp_image) => {
-                    
+                    const packet = new Buffer.alloc(get_compressed_image_packet_size(comp_image));
+                    add_compressed_image_to_packet(comp_image, packet, 0);
+                    send_packet_to_clients(packet);
                 });
         }
 
