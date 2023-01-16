@@ -763,13 +763,14 @@ let image_requestors = 0;
 
 function subscribe_for_image_topic(ros_node, subscriber_count) {
     if (subscriber_count > 0) {
-        ilog(`Subscribing to image topic at period of ${subscriber_count * 100} ms`);
+        const ms_period = 100*subscriber_count + (wsockets.length + dt_sockets.length)*50 - 50.0;
+        ilog(`Subscribing to image topic at period of ${ms_period} ms`);
         return ros_node.subscribe("/camera/left/image_color/compressed", "sensor_msgs/CompressedImage",
             (comp_image) => {
                 const packet = new Buffer.alloc(get_compressed_image_packet_size(comp_image));
                 add_compressed_image_to_packet(comp_image, packet, 0);
                 send_packet_to_clients(packet);
-            }, { throttleMs: subscriber_count * 100 });
+            }, { throttleMs: ms_period });
     }
     return null;
 }
