@@ -773,7 +773,7 @@ function subscribe_for_image_topic(ros_node, subscriber_count) {
 
 function handle_image_subsriber_count_change(new_requestor_count)
 {
-    if (jackal_cam_sub) {
+    if (jackal_cam_sub !== null) {
         rosnodejs.nh.unsubscribe("/camera/left/image_color/compressed").then(function () {
             ilog(`Unsubscribed from image topic due to subscriber count change (new count ${new_requestor_count})`);
             if (new_requestor_count > 0)
