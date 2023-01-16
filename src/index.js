@@ -758,7 +758,7 @@ function proc_timeout(proc) {
     }
 }
 
-let jackal_cam_sub = {};
+let jackal_cam_sub = null;
 let image_requestors = 0;
 
 function subscribe_for_image_topic(ros_node, subscriber_count) {
@@ -776,10 +776,13 @@ function handle_image_subsriber_count_change(new_requestor_count)
     if (jackal_cam_sub) {
         rosnodejs.nh.unsubscribe("/camera/left/image_color/compressed").then(function () {
             ilog(`Unsubscribed from image topic due to subscriber count change (new count ${new_requestor_count})`);
-            jackal_cam_sub = subscribe_for_image_topic(rosnodejs.nh, new_requestor_count);
+            if (new_requestor_count > 0)
+                jackal_cam_sub = subscribe_for_image_topic(rosnodejs.nh, new_requestor_count);
+            else
+                jackal_cam_sub = null;
         });
     }
-    else {
+    else if (new_requestor_count > 0) {
         jackal_cam_sub = subscribe_for_image_topic(rosnodejs.nh, new_requestor_count);
     }
 }
