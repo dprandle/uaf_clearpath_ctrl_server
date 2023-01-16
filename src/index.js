@@ -787,15 +787,14 @@ function subscribe_for_image_topic(ros_node, image_reqs) {
 }
 
 function handle_image_subsriber_count_change(image_reqs) {
-    const new_requestor_count = image_reqs.length;
     if (jackal_cam_sub) {
         rosnodejs.nh.unsubscribe("/camera/left/image_color/compressed").then(function () {
-            ilog(`Unsubscribed from image topic due to subscriber count change (new count ${new_requestor_count})`);
-            jackal_cam_sub = subscribe_for_image_topic(rosnodejs.nh, new_requestor_count);
+            ilog(`Unsubscribed from image topic due to subscriber count change (new count ${image_reqs.length})`);
+            jackal_cam_sub = subscribe_for_image_topic(rosnodejs.nh, image_reqs);
         });
     }
-    else if (new_requestor_count > 0) {
-        jackal_cam_sub = subscribe_for_image_topic(rosnodejs.nh, new_requestor_count);
+    else if (image_reqs.length > 0) {
+        jackal_cam_sub = subscribe_for_image_topic(rosnodejs.nh, image_reqs);
     }
 }
 
