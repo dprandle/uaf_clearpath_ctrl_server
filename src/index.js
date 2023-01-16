@@ -278,10 +278,10 @@ function add_scan_to_packet(scan, packet, offset) {
 
 function add_compressed_image_to_packet(compressed_image_msg, packet, offset) {
     offset = write_packet_header(comp_img_pckt_id, packet, offset);
-    offset = packet.writeInt8(1, offset);
+    offset = packet.writeUInt8(1, offset);
     offset = packet.writeUInt32LE(compressed_image_msg.data.length, offset);
     for (let i = 0; i < compressed_image_msg.data.length; ++i)
-        offset = packet.writeInt8(compressed_image_msg.data[i], offset);
+        offset = packet.writeUInt8(compressed_image_msg.data[i], offset);
     return offset;
 }
 
