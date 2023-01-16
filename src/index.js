@@ -715,7 +715,6 @@ rosnodejs.initNode("/command_server")
                     const packet = new Buffer.alloc(get_compressed_image_packet_size(comp_image));
                     add_compressed_image_to_packet(comp_image, packet, 0);
                     send_packet_to_clients(packet);
-                    ilog("Sending image");
                 }, {throttleMs: 200});
         }
 
