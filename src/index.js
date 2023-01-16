@@ -759,9 +759,20 @@ function proc_timeout(proc) {
 }
 
 let jackal_cam_sub = null;
-let image_requestors = 0;
+let image_requestors = [];
 
-function subscribe_for_image_topic(ros_node, subscriber_count) {
+function item_in_array(item, array)
+{
+    for (let i = 0; i < array.length; ++i)
+    {
+        if (array[i] === item)
+            return true;
+    }
+    return false;
+}
+
+function subscribe_for_image_topic(ros_node, image_reqs) {
+    const subscriber_count = image_reqs.length;
     if (subscriber_count > 0) {
         const ms_period = 100*subscriber_count + (wsockets.length + dt_sockets.length)*100 - 150.0;
         ilog(`Subscribing to image topic at period of ${ms_period} ms`);
@@ -775,7 +786,8 @@ function subscribe_for_image_topic(ros_node, subscriber_count) {
     return null;
 }
 
-function handle_image_subsriber_count_change(new_requestor_count) {
+function handle_image_subsriber_count_change(image_reqs) {
+    const new_requestor_count = image_reqs.length;
     if (jackal_cam_sub) {
         rosnodejs.nh.unsubscribe("/camera/left/image_color/compressed").then(function () {
             ilog(`Unsubscribed from image topic due to subscriber count change (new count ${new_requestor_count})`);
@@ -787,8 +799,7 @@ function handle_image_subsriber_count_change(new_requestor_count) {
     }
 }
 
-function parse_incoming_data(data) {
-    []
+function parse_incoming_data(data, sckt) {
     const hdr = parse_command_header(data);
     if (hdr === vel_cmd_header.type) {
         const vel_cmd = parse_vel_cmd(data);
@@ -821,11 +832,11 @@ function parse_incoming_data(data) {
         }
     }
     else if (hdr === enable_img_cmd_id.type) {
-        ++image_requestors;
+        image_requestors.push(sckt);
         handle_image_subsriber_count_change(image_requestors);
     }
     else if (hdr === disable_img_cmd_id.type) {
-        --image_requestors;
+        remove_element_at_index(get_element_index(sckt, image_requestors), image_requestors);
         handle_image_subsriber_count_change(image_requestors);
     }
     else if (hdr == get_params_cmd_header.type) {
@@ -914,12 +925,14 @@ function parse_incoming_data(data) {
 wss.on("connection", web_sckt => {
     // sending message
     web_sckt.on("message", data => {
-        parse_incoming_data(data);
+        parse_incoming_data(data, web_sckt);
     });
 
     // handling what to do when clients disconnects from server
     web_sckt.on("close", (code, reason) => {
         remove_socket_from_array(web_sckt, wsockets);
+        remove_element_at_index(get_element_index(sckt, image_requestors), image_requestors);
+        handle_image_subsriber_count_change(image_requestors);
         ilog(`Connection to ws client closed with code ${code} for reason ${reason} - ${wsockets.length} ws clients remain connected`);
     });
 
@@ -941,7 +954,7 @@ wss.on("connection", web_sckt => {
 non_browser_server.on("connection", (dt_skt) => {
     // sending message
     dt_skt.on("data", data => {
-        parse_incoming_data(data);
+        parse_incoming_data(data, dt_skt);
     });
 
     dt_skt.on("error", err => {
@@ -951,6 +964,8 @@ non_browser_server.on("connection", (dt_skt) => {
     // handling what to do when clients disconnects from server
     dt_skt.on("close", () => {
         remove_socket_from_array(dt_skt, dt_sockets);
+        remove_element_at_index(get_element_index(sckt, image_requestors), image_requestors);
+        handle_image_subsriber_count_change(image_requestors);
         ilog(`Connection to non ws client ${dt_skt.remoteAddress}:${dt_skt.remotePort} was closed - ${dt_sockets.length} non ws clients remain connected`);
     });
 
