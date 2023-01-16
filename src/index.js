@@ -115,6 +115,13 @@ const comp_img_pckt_id = {
     type: "COMP_IMG_PCKT_ID"
 }
 
+const enable_img_cmd_id = {
+    type: "ENABLE_IMG_CMD_ID"
+}
+
+const disable_img_cmd_id = {
+    type: "DISABLE_IMG_CMD_ID"
+}
 
 let debug_print = false;
 let warning_print = true;
@@ -707,17 +714,6 @@ rosnodejs.initNode("/command_server")
                 convert_tforms_key_val(tf_message, frame_tforms);
             });
 
-        // Subscribe to the color compressed image topic if jackal - left is chose arbitrarily
-        if (IS_JACKAL) {
-            ilog("Subscribing to /camera/left/image_color/compressed")
-            ros_node.subscribe("/camera/left/image_color/compressed", "sensor_msgs/CompressedImage",
-                (comp_image) => {
-                    const packet = new Buffer.alloc(get_compressed_image_packet_size(comp_image));
-                    add_compressed_image_to_packet(comp_image, packet, 0);
-                    send_packet_to_clients(packet);
-                }, {throttleMs: 100});
-        }
-
         ros_node.subscribe("/tf_static", "tf2_msgs/TFMessage",
             (tf_message) => {
                 convert_tforms_key_val(tf_message, static_tforms);
@@ -762,6 +758,39 @@ function proc_timeout(proc) {
     }
 }
 
+let jackal_cam_sub = {};
+let image_requestors = 0;
+
+function subscribe_for_image_topic(ros_node, subscriber_count) {
+    ilog(`Subscribing to image topic at period of ${subscriber_count * 50} ms`);
+    return ros_node.subscribe("/camera/left/image_color/compressed", "sensor_msgs/CompressedImage",
+        (comp_image) => {
+            const packet = new Buffer.alloc(get_compressed_image_packet_size(comp_image));
+            add_compressed_image_to_packet(comp_image, packet, 0);
+            send_packet_to_clients(packet);
+        }, { throttleMs: subscriber_count * 50 });
+}
+
+function handle_image_subsriber_count_change(new_requestor_count)
+{
+    if (jackal_cam_sub) {
+        rosnodejs.nh.unsubscribe("/camera/left/image_color/compressed").then(function (result) {
+            if (result)
+            {
+                ilog(`Unsubscribed from image topic due to subscriber count change (new count ${new_requestor_count})`);
+                jackal_cam_sub = subscribe_for_image_topic(rosnodejs.nh, new_requestor_count);
+            }
+            else
+            {
+                wlog("Could not unsubscribe from cam topic");
+            }
+        });
+    }
+    else {
+        jackal_cam_sub = subscribe_for_image_topic(rosnodejs.nh, new_requestor_count);
+    }
+}
+
 function parse_incoming_data(data) {
     const hdr = parse_command_header(data);
     if (hdr === vel_cmd_header.type) {
@@ -793,6 +822,14 @@ function parse_incoming_data(data) {
                 cancel_goal_pub.publish(current_goal_status_msg.status_list[i].goal_id);
             }
         }
+    }
+    else if (hdr === enable_img_cmd_id.type) {
+        ++image_requestors;
+        handle_image_subsriber_count_change(image_requestors);
+    }
+    else if (hdr === disable_img_cmd_id.type) {
+        --image_requestors;
+        handle_image_subsriber_count_change(image_requestors);
     }
     else if (hdr == get_params_cmd_header.type) {
         const proc = spawn("rosrun", ["dynamic_reconfigure", "dynparam", "list"]);
