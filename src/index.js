@@ -930,7 +930,7 @@ wss.on("connection", web_sckt => {
     // handling what to do when clients disconnects from server
     web_sckt.on("close", (code, reason) => {
         remove_socket_from_array(web_sckt, wsockets);
-        remove_element_at_index(get_element_index(sckt, image_requestors), image_requestors);
+        remove_element_at_index(get_element_index(web_sckt, image_requestors), image_requestors);
         handle_image_subsriber_count_change(image_requestors);
         ilog(`Connection to ws client closed with code ${code} for reason ${reason} - ${wsockets.length} ws clients remain connected`);
     });
@@ -963,7 +963,7 @@ non_browser_server.on("connection", (dt_skt) => {
     // handling what to do when clients disconnects from server
     dt_skt.on("close", () => {
         remove_socket_from_array(dt_skt, dt_sockets);
-        remove_element_at_index(get_element_index(sckt, image_requestors), image_requestors);
+        remove_element_at_index(get_element_index(dt_skt, image_requestors), image_requestors);
         handle_image_subsriber_count_change(image_requestors);
         ilog(`Connection to non ws client ${dt_skt.remoteAddress}:${dt_skt.remotePort} was closed - ${dt_sockets.length} non ws clients remain connected`);
     });
