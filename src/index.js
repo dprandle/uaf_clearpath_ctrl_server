@@ -763,7 +763,7 @@ let image_requestors = 0;
 
 function subscribe_for_image_topic(ros_node, subscriber_count) {
     if (subscriber_count > 0) {
-        const ms_period = 100*subscriber_count + (wsockets.length + dt_sockets.length)*100 - 100.0;
+        const ms_period = 100*subscriber_count + (wsockets.length + dt_sockets.length)*100 - 150.0;
         ilog(`Subscribing to image topic at period of ${ms_period} ms`);
         return ros_node.subscribe("/camera/left/image_color/compressed", "sensor_msgs/CompressedImage",
             (comp_image) => {
