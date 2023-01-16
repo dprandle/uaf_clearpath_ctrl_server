@@ -762,24 +762,23 @@ let jackal_cam_sub = null;
 let image_requestors = 0;
 
 function subscribe_for_image_topic(ros_node, subscriber_count) {
-    ilog(`Subscribing to image topic at period of ${subscriber_count * 50} ms`);
-    return ros_node.subscribe("/camera/left/image_color/compressed", "sensor_msgs/CompressedImage",
-        (comp_image) => {
-            const packet = new Buffer.alloc(get_compressed_image_packet_size(comp_image));
-            add_compressed_image_to_packet(comp_image, packet, 0);
-            send_packet_to_clients(packet);
-        }, { throttleMs: subscriber_count * 100 });
+    if (subscriber_count > 0) {
+        ilog(`Subscribing to image topic at period of ${subscriber_count * 100} ms`);
+        return ros_node.subscribe("/camera/left/image_color/compressed", "sensor_msgs/CompressedImage",
+            (comp_image) => {
+                const packet = new Buffer.alloc(get_compressed_image_packet_size(comp_image));
+                add_compressed_image_to_packet(comp_image, packet, 0);
+                send_packet_to_clients(packet);
+            }, { throttleMs: subscriber_count * 100 });
+    }
+    return null;
 }
 
-function handle_image_subsriber_count_change(new_requestor_count)
-{
+function handle_image_subsriber_count_change(new_requestor_count) {
     if (jackal_cam_sub) {
         rosnodejs.nh.unsubscribe("/camera/left/image_color/compressed").then(function () {
             ilog(`Unsubscribed from image topic due to subscriber count change (new count ${new_requestor_count})`);
-            if (new_requestor_count > 0)
-                jackal_cam_sub = subscribe_for_image_topic(rosnodejs.nh, new_requestor_count);
-            else
-                jackal_cam_sub = null;
+            jackal_cam_sub = subscribe_for_image_topic(rosnodejs.nh, new_requestor_count);
         });
     }
     else if (new_requestor_count > 0) {
@@ -787,7 +786,8 @@ function handle_image_subsriber_count_change(new_requestor_count)
     }
 }
 
-function parse_incoming_data(data) {[]
+function parse_incoming_data(data) {
+    []
     const hdr = parse_command_header(data);
     if (hdr === vel_cmd_header.type) {
         const vel_cmd = parse_vel_cmd(data);
