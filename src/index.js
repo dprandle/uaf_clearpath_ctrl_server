@@ -932,6 +932,7 @@ wss.on("connection", web_sckt => {
     send_prev_occ_grid_to_new_client(prev_frame_glob_cm_msg, glob_cm_header, web_sckt, (sckt, pckt) => { sckt.send(pckt); });
     send_prev_occ_grid_to_new_client(prev_frame_map_msg, map_header, web_sckt, (sckt, pckt) => { sckt.send(pckt); });
     send_static_tforms_to_new_client(static_tforms, web_sckt, (sckt, pckt) => { sckt.send(pckt); });
+    handle_image_subsriber_count_change(image_requestors);
     ilog(`New client connected for web sockets - ${wsockets.length} web sockets connected`);
 });
 
@@ -957,6 +958,7 @@ non_browser_server.on("connection", (dt_skt) => {
     send_prev_occ_grid_to_new_client(prev_frame_glob_cm_msg, glob_cm_header, dt_skt, (sckt, pckt) => { sckt.write(pckt); });
     send_prev_occ_grid_to_new_client(prev_frame_map_msg, map_header, dt_skt, (sckt, pckt) => { sckt.write(pckt); });
     send_static_tforms_to_new_client(static_tforms, dt_skt, (sckt, pckt) => { sckt.write(pckt); });
+    handle_image_subsriber_count_change(image_requestors);
     ilog(`Client connected from ${dt_skt.remoteAddress}:${dt_skt.remotePort} - ${dt_sockets.length} non ws clients connected`);
 });
 
