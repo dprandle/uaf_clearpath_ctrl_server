@@ -774,16 +774,9 @@ function subscribe_for_image_topic(ros_node, subscriber_count) {
 function handle_image_subsriber_count_change(new_requestor_count)
 {
     if (jackal_cam_sub) {
-        rosnodejs.nh.unsubscribe("/camera/left/image_color/compressed").then(function (result) {
-            if (result)
-            {
-                ilog(`Unsubscribed from image topic due to subscriber count change (new count ${new_requestor_count})`);
-                jackal_cam_sub = subscribe_for_image_topic(rosnodejs.nh, new_requestor_count);
-            }
-            else
-            {
-                wlog("Could not unsubscribe from cam topic");
-            }
+        rosnodejs.nh.unsubscribe("/camera/left/image_color/compressed").then(function () {
+            ilog(`Unsubscribed from image topic due to subscriber count change (new count ${new_requestor_count})`);
+            jackal_cam_sub = subscribe_for_image_topic(rosnodejs.nh, new_requestor_count);
         });
     }
     else {
@@ -791,7 +784,7 @@ function handle_image_subsriber_count_change(new_requestor_count)
     }
 }
 
-function parse_incoming_data(data) {
+function parse_incoming_data(data) {[]
     const hdr = parse_command_header(data);
     if (hdr === vel_cmd_header.type) {
         const vel_cmd = parse_vel_cmd(data);
