@@ -716,7 +716,7 @@ rosnodejs.initNode("/command_server")
                     add_compressed_image_to_packet(comp_image, packet, 0);
                     send_packet_to_clients(packet);
                     ilog("Sending image");
-                }, {throttleMs: 2000});
+                }, {throttleMs: 200});
         }
 
         ros_node.subscribe("/tf_static", "tf2_msgs/TFMessage",
