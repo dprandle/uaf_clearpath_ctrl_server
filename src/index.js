@@ -768,7 +768,7 @@ function subscribe_for_image_topic(ros_node, subscriber_count) {
             const packet = new Buffer.alloc(get_compressed_image_packet_size(comp_image));
             add_compressed_image_to_packet(comp_image, packet, 0);
             send_packet_to_clients(packet);
-        }, { throttleMs: subscriber_count * 50 });
+        }, { throttleMs: subscriber_count * 100 });
 }
 
 function handle_image_subsriber_count_change(new_requestor_count)
