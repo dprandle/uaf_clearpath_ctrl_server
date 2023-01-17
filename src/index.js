@@ -671,7 +671,7 @@ function update_param_check(cur_param_proc, pstack) {
 }
 
 let frame_count = 0;
-let prev_time = 0;
+let prev_time = process.hrtime.bigint();
 
 setInterval(send_tforms, 0, function() {
     ++frame_count;
