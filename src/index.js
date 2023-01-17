@@ -1,4 +1,3 @@
-const { PerformanceObserver, performance } = require('node:perf_hooks');
 const express = require('express');
 const path = require('path');
 const rosnodejs = require('rosnodejs');
@@ -679,8 +678,8 @@ setInterval(send_tforms, 0, function() {
 });
 
 setInterval(function() {
-    const cur_time = performance.now();
-    let dt = (cur_time - prev_time) / 1000.0;
+    const cur_time = process.hrtime.bigint();
+    let dt = (cur_time - prev_time) / 1000000000;
     prev_time = cur_time;
     frame_count = 0;
     ilog(`Average FPS: ${frame_count / dt} (${frame_count} frames in ${dt} secs)`);
