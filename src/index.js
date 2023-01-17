@@ -1,3 +1,4 @@
+const { PerformanceObserver, performance } = require('node:perf_hooks');
 const express = require('express');
 const path = require('path');
 const rosnodejs = require('rosnodejs');
@@ -669,6 +670,21 @@ function update_param_check(cur_param_proc, pstack) {
         ilog(msg);
     }
 }
+
+let frame_count = 0;
+let prev_time = 0;
+
+setInterval(send_tforms, 0, function() {
+    ++frame_count;
+});
+
+setInterval(function() {
+    const cur_time = performance.now();
+    let dt = (cur_time - prev_time) / 1000.0;
+    prev_time = cur_time;
+    frame_count = 0;
+    ilog(`Average FPS: ${frame_count / dt} (${frame_count} frames in ${dt} secs)`);
+});
 
 // Create command server ROS node wich will relay our socket communications to control and monitor the robotrosnodejs
 rosnodejs.initNode("/command_server")
