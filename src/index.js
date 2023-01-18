@@ -747,7 +747,6 @@ function update_and_send_misc_stats()
     const packet = new Buffer.alloc(get_misc_stats_packet_size());
     add_misc_stats_to_packet(misc_stats, packet, 0);
     send_packet_to_clients(packet);
-    ilog(`Conn Count:${misc_stats.conn_count} cur_bw:${misc_stats.cur_bw_mbps} avg_bw:${misc_stats.avg_bw_mbps}`);
 }
 
 // Create command server ROS node wich will relay our socket communications to control and monitor the robotrosnodejs
