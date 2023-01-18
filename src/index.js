@@ -46,6 +46,15 @@ let prev_frame_glob_cm_msg = {};
 let prev_frame_loc_cm_msg = {};
 let current_goal_status_msg = {};
 
+const misc_stats = {
+    conn_count: 0,
+    cur_bw_mbps: 0,
+    avg_bw_mbps: 0
+};
+
+const MISC_STAT_PERIOD_MS = 1000;
+const MISC_STAT_AVG_CNT = 10;
+let total_cur_data_bytes = 0;
 
 const scan_packet_header = {
     type: "SCAN_PCKT_ID"
@@ -123,6 +132,10 @@ const disable_img_cmd_id = {
     type: "DISABLE_IMG_CMD_ID"
 }
 
+const misc_stats_pckt_id = {
+    type: "MISC_STATS_PCKT_ID"
+}
+
 let debug_print = false;
 let warning_print = true;
 let info_print = true;
@@ -149,11 +162,28 @@ function remove_socket_from_array(sckt, array) {
     remove_element_at_index(get_element_index(sckt, array), array);
 }
 
-function send_packet_to_clients(packet) {
-    for (let i = 0; i < wsockets.length; ++i)
-        wsockets[i].send(packet, { binary: true });
-    for (let i = 0; i < dt_sockets.length; ++i)
-        dt_sockets[i].write(packet);
+function send_packet_to_clients(packet, override_rate_limit = false) {
+    for (let i = 0; i < wsockets.length; ++i) {
+        if (wsockets[i].bufferedAmount == 0 || override_rate_limit) {
+            wsockets[i].send(packet, { binary: true });
+            total_cur_data_bytes += packet.length;
+        }
+        else {
+            ilog(`Skipping ws packet with length ${packet.length}`);
+        }
+    }
+    for (let i = 0; i < dt_sockets.length; ++i) {
+        if (dt_sockets[i].ready_for_more_data) {
+            dt_sockets[i].ready_for_more_data = false;
+            dt_sockets[i].write(packet, '', () => {
+                dt_sockets[i].ready_for_more_data = true;
+                total_cur_data_bytes += packet.length;
+            });
+        }
+        else {
+            ilog(`Skipping ws packet with length ${packet.length}`);
+        }
+    }
 }
 
 function write_packet_string(str, len, packet, offset) {
@@ -168,6 +198,25 @@ function write_packet_string(str, len, packet, offset) {
 
 function write_packet_header(packet_header, packet, offset) {
     return write_packet_string(packet_header.type, PACKET_STR_ID_LEN, packet, offset);
+}
+
+function at_least_one_socket_ready() {
+    for (let i = 0; i < wsockets.length; ++i) {
+        if (wsockets[i].bufferedAmount == 0)
+            return true;
+    }
+    for (let i = 0; i < dt_sockets.length; ++i) {
+        if (dt_sockets[i].ready_for_more_data)
+            return true;
+    }
+}
+
+function sum_elements(array)
+{
+    let ret = 0;
+    for (let i = 0; i < array.length; ++i)
+        ret += array[i];
+    return ret;
 }
 
 // We don't need to send the entire costmap every update - instead just send the size of the costmap and changes
@@ -450,7 +499,7 @@ function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg, header) {
         const packet = new Buffer.alloc(packet_size);
         add_occgrid_to_packet(cur_occ_grid_msg, frame_changes, header, reset_map, packet, 0);
         dlog(`Sending occ grid packet ${JSON.stringify(header)} (${packet.length}B or ${packet.length / MB_SIZE}MB) to ${total_connections} clients`);
-        send_packet_to_clients(packet);
+        send_packet_to_clients(packet, true);
     }
 }
 
@@ -474,9 +523,6 @@ function add_transform_to_packet(tf, packet, offset) {
     offset = write_packet_string(tf.header.frame_id, TFORM_NODE_NAME_LEN, packet, offset);
     offset = write_packet_string(tf.child_frame_id, TFORM_NODE_NAME_LEN, packet, offset);
 
-    // Connection count
-    offset = packet.writeInt8(wsockets.length + dt_sockets.length, offset);
-
     // Transform position
     offset = packet.writeDoubleLE(tf.transform.translation.x, offset);
     offset = packet.writeDoubleLE(tf.transform.translation.y, offset);
@@ -487,6 +533,14 @@ function add_transform_to_packet(tf, packet, offset) {
     offset = packet.writeDoubleLE(tf.transform.rotation.y, offset);
     offset = packet.writeDoubleLE(tf.transform.rotation.z, offset);
     offset = packet.writeDoubleLE(tf.transform.rotation.w, offset);
+    return offset;
+}
+
+function add_misc_stats_to_packet(ms, packet, offset) {
+    offset = write_packet_header(misc_stats_pckt_id, packet, offset);
+    offset = packet.writeUInt8(ms.conn_count, offset);
+    offset = packet.writeFloatLE(ms.cur_bw_mbps, offset);
+    offset = packet.writeFloatLE(ms.avg_bw_mbps, offset);
     return offset;
 }
 
@@ -518,6 +572,10 @@ function send_static_tforms_to_new_client(tforms, socket, func_to_use) {
     }
 }
 
+function get_misc_stats_packet_size() {
+    return PACKET_STR_ID_LEN + 1 + 4 + 4;
+}
+
 function get_navp_packet_size(navmsg) {
     // 4 bytes for poses array size, then each pose is 7 doubles of 8 bytes each (3 for position and 4 for orientation)
     return PACKET_STR_ID_LEN + 4 + navmsg.poses.length * 7 * 8;
@@ -534,7 +592,7 @@ function get_scan_packet_size(scan_msg) {
 }
 
 function get_transform_packet_size() {
-    return PACKET_STR_ID_LEN + 32 + 32 + 1 + 8 * 3 + 8 * 4;
+    return PACKET_STR_ID_LEN + 32 + 32 + 8 * 3 + 8 * 4;
 }
 
 function get_transforms_packet_size(tforms) {
@@ -641,12 +699,16 @@ function run_child_process(name, args, send_err = false, send_output = false, se
 }
 
 function on_global_navp_msg(navmsg) {
+    if (!at_least_one_socket_ready())
+        return;
     const packet = new Buffer.alloc(get_navp_packet_size(navmsg));
     add_navp_to_packet(navmsg, glob_navp_pcket_header, packet, 0);
     send_packet_to_clients(packet);
 }
 
 function on_local_navp_msg(navmsg) {
+    if (!at_least_one_socket_ready())
+        return;
     const packet = new Buffer.alloc(get_navp_packet_size(navmsg));
     add_navp_to_packet(navmsg, loc_navp_pcket_header, packet, 0);
     send_packet_to_clients(packet);
@@ -670,20 +732,23 @@ function update_param_check(cur_param_proc, pstack) {
     }
 }
 
-let frame_count = 0;
-let prev_time = process.hrtime.bigint();
+let avg_array = [];
 
-setInterval(send_tforms, 0, function() {
-    ++frame_count;
-});
+function update_and_send_misc_stats()
+{
+    misc_stats.conn_count = dt_sockets.length + wsockets.length;
+    misc_stats.cur_bw_mbps = (total_cur_data_bytes*1000) / (MISC_STAT_PERIOD_MS*(1024*1024));
+    total_cur_data_bytes = 0;
+    avg_array.push(misc_stats.cur_bw_mbps);
+    if (avg_array.length > MISC_STAT_AVG_CNT)
+        avg_array.shift();
+    misc_stats.avg_bw_mbps = sum_elements(avg_array) / avg_array.length;
 
-setInterval(function() {
-    const cur_time = process.hrtime.bigint();
-    let dt = (cur_time - prev_time) / 1000000000;
-    prev_time = cur_time;
-    frame_count = 0;
-    ilog(`Average FPS: ${frame_count / dt} (${frame_count} frames in ${dt} secs)`);
-});
+    const packet = new Buffer.alloc(get_misc_stats_packet_size());
+    add_misc_stats_to_packet(misc_stats, packet, 0);
+    send_packet_to_clients(packet);
+    ilog(`Conn Count:${misc_stats.conn_count} cur_bw:${misc_stats.cur_bw_mbps} avg_bw:${misc_stats.avg_bw_mbps}`);
+}
 
 // Create command server ROS node wich will relay our socket communications to control and monitor the robotrosnodejs
 rosnodejs.initNode("/command_server")
@@ -694,6 +759,7 @@ rosnodejs.initNode("/command_server")
 
         setInterval(send_tforms, 30, frame_tforms);
         setInterval(update_param_check, 30, cur_param_proc, param_stack);
+        setInterval(update_and_send_misc_stats, MISC_STAT_PERIOD_MS);
 
         // Subscribe to the occupancy grid map messages - send packet with the map info
         ros_node.subscribe("/map", "nav_msgs/OccupancyGrid",
@@ -741,14 +807,18 @@ rosnodejs.initNode("/command_server")
         // Subscribe to the laser scan messages - send a packet with the scan info
         ros_node.subscribe("/front/scan", "sensor_msgs/LaserScan",
             (scan) => {
+                if (!at_least_one_socket_ready())
+                    return;
                 const packet = new Buffer.alloc(get_scan_packet_size(scan));
                 add_scan_to_packet(scan, packet, 0);
                 send_packet_to_clients(packet);
-            });
+            }, { throttleMs: 100 });
 
         ros_node.subscribe("/move_base/status", "actionlib_msgs/GoalStatusArray",
             (status_msg) => {
                 current_goal_status_msg.status_list = status_msg.status_list;
+                if (!at_least_one_socket_ready())
+                    return;
                 const packet = new Buffer.alloc(get_goal_status_packet_size());
                 add_goal_stat_to_packet(current_goal_status_msg, packet, 0);
                 send_packet_to_clients(packet);
@@ -776,23 +846,15 @@ function proc_timeout(proc) {
 let jackal_cam_sub = null;
 let image_requestors = [];
 
-function item_in_array(item, array)
-{
-    for (let i = 0; i < array.length; ++i)
-    {
-        if (array[i] === item)
-            return true;
-    }
-    return false;
-}
-
 function subscribe_for_image_topic(ros_node, image_reqs) {
     const subscriber_count = image_reqs.length;
     if (subscriber_count > 0) {
-        const ms_period = 100*subscriber_count + (wsockets.length + dt_sockets.length)*100 - 150.0;
+        const ms_period = 100 * subscriber_count + (wsockets.length + dt_sockets.length) * 100 - 150.0;
         ilog(`Subscribing to image topic at period of ${ms_period} ms`);
         return ros_node.subscribe("/camera/left/image_color/compressed", "sensor_msgs/CompressedImage",
             (comp_image) => {
+                if (!at_least_one_socket_ready())
+                    return;
                 const packet = new Buffer.alloc(get_compressed_image_packet_size(comp_image));
                 add_compressed_image_to_packet(comp_image, packet, 0);
                 send_packet_to_clients(packet);
@@ -814,6 +876,7 @@ function handle_image_subsriber_count_change(image_reqs) {
 }
 
 function parse_incoming_data(data, sckt) {
+    total_cur_data_bytes += data.length;
     const hdr = parse_command_header(data);
     if (hdr === vel_cmd_header.type) {
         const vel_cmd = parse_vel_cmd(data);
@@ -956,6 +1019,7 @@ wss.on("connection", web_sckt => {
     });
 
     wsockets.push(web_sckt);
+    web_sckt.ready_for_more_data = true;
     send_prev_occ_grid_to_new_client(prev_frame_glob_cm_msg, glob_cm_header, web_sckt, (sckt, pckt) => { sckt.send(pckt); });
     send_prev_occ_grid_to_new_client(prev_frame_map_msg, map_header, web_sckt, (sckt, pckt) => { sckt.send(pckt); });
     send_static_tforms_to_new_client(static_tforms, web_sckt, (sckt, pckt) => { sckt.send(pckt); });
@@ -982,8 +1046,8 @@ non_browser_server.on("connection", (dt_skt) => {
         handle_image_subsriber_count_change(image_requestors);
         ilog(`Connection to non ws client ${dt_skt.remoteAddress}:${dt_skt.remotePort} was closed - ${dt_sockets.length} non ws clients remain connected`);
     });
-
     dt_sockets.push(dt_skt);
+    dt_skt.ready_for_more_data = true;
     send_prev_occ_grid_to_new_client(prev_frame_glob_cm_msg, glob_cm_header, dt_skt, (sckt, pckt) => { sckt.write(pckt); });
     send_prev_occ_grid_to_new_client(prev_frame_map_msg, map_header, dt_skt, (sckt, pckt) => { sckt.write(pckt); });
     send_static_tforms_to_new_client(static_tforms, dt_skt, (sckt, pckt) => { sckt.write(pckt); });
