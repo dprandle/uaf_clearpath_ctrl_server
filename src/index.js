@@ -31,6 +31,12 @@ const ROBOT_HOSTNAME = os.hostname();
 const IS_JACKAL = (ROBOT_HOSTNAME === JACKAL_HOSTNAME);
 const IS_HUSKY = (ROBOT_HOSTNAME === HUSKY_HOSTNAME);
 
+let jackal_cam_sub = null;
+let image_requestors = [];
+const PER_IMAGE_MS_DELAY = 100;
+const PER_CONNECT_MS_DELAY = 100;
+const IMAGE_PERIOD_CONST_MS = 150;
+
 let cmd_vel_pub = {};
 let cmd_goal_pub = {};
 let clear_map_client = {};
@@ -168,9 +174,6 @@ function send_packet_to_clients(packet, override_rate_limit = false) {
             wsockets[i].send(packet, { binary: true });
             total_cur_data_bytes += packet.length;
         }
-        else {
-            ilog(`Skipping ws packet with length ${packet.length}`);
-        }
     }
     for (let i = 0; i < dt_sockets.length; ++i) {
         if (dt_sockets[i].ready_for_more_data) {
@@ -179,9 +182,6 @@ function send_packet_to_clients(packet, override_rate_limit = false) {
                 dt_sockets[i].ready_for_more_data = true;
                 total_cur_data_bytes += packet.length;
             });
-        }
-        else {
-            ilog(`Skipping ws packet with length ${packet.length}`);
         }
     }
 }
@@ -266,9 +266,9 @@ function get_occgrid_packet_size(frame_changes) {
     return PACKET_STR_ID_LEN + 4 * 3 + 8 * 7 + 1 + 4 + frame_changes.length * 4;
 }
 
-function get_compressed_image_packet_size(comp_image_msg) {
+function get_compressed_image_header_packet_size(comp_image_msg) {
     /// Header bytes plus one byte for format, four bytes for data size, and however many bytes are in the data
-    return PACKET_STR_ID_LEN + 1 + 4 + comp_image_msg.data.length;
+    return PACKET_STR_ID_LEN + 1 + 4;// + comp_image_msg.data.length;
 }
 
 function add_occgrid_to_packet(occ_grid_msg, frame_changes, header, reset_map, packet, offset) {
@@ -332,12 +332,10 @@ function add_scan_to_packet(scan, packet, offset) {
     return offset;
 }
 
-function add_compressed_image_to_packet(compressed_image_msg, packet, offset) {
+function add_compressed_image_header_to_packet(compressed_image_msg, packet, offset) {
     offset = write_packet_header(comp_img_pckt_id, packet, offset);
     offset = packet.writeUInt8(1, offset);
     offset = packet.writeUInt32LE(compressed_image_msg.data.length, offset);
-    for (let i = 0; i < compressed_image_msg.data.length; ++i)
-        offset = packet.writeUInt8(compressed_image_msg.data[i], offset);
     return offset;
 }
 
@@ -842,21 +840,22 @@ function proc_timeout(proc) {
     }
 }
 
-let jackal_cam_sub = null;
-let image_requestors = [];
-
 function subscribe_for_image_topic(ros_node, image_reqs) {
     const subscriber_count = image_reqs.length;
     if (subscriber_count > 0) {
-        const ms_period = 100 * subscriber_count + (wsockets.length + dt_sockets.length) * 100 - 150.0;
+        const ms_period = PER_IMAGE_MS_DELAY * subscriber_count + (wsockets.length + dt_sockets.length) * PER_CONNECT_MS_DELAY - IMAGE_PERIOD_CONST_MS;
         ilog(`Subscribing to image topic at period of ${ms_period} ms`);
         return ros_node.subscribe("/camera/left/image_color/compressed", "sensor_msgs/CompressedImage",
             (comp_image) => {
                 if (!at_least_one_socket_ready())
                     return;
-                const packet = new Buffer.alloc(get_compressed_image_packet_size(comp_image));
-                add_compressed_image_to_packet(comp_image, packet, 0);
+                const packet = new Buffer.alloc(get_compressed_image_header_packet_size(comp_image));
+                add_compressed_image_header_to_packet(comp_image, packet, 0);
+                // Send the image header info
                 send_packet_to_clients(packet);
+                
+                // Just send the data blob from the image directly - no need to copy to the array buffer packet
+                send_packet_to_clients(comp_image.data);
             }, { throttleMs: ms_period });
     }
     return null;
@@ -1000,6 +999,7 @@ function parse_incoming_data(data, sckt) {
 // Serve to browsers via websockets
 wss.on("connection", web_sckt => {
     // sending message
+    //web_sckt.binaryType = "arraybuffer";
     web_sckt.on("message", data => {
         parse_incoming_data(data, web_sckt);
     });
