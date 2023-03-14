@@ -142,7 +142,7 @@ const misc_stats_pckt_id = {
     type: "MISC_STATS_PCKT_ID"
 }
 
-let debug_print = false;
+let debug_print = true;
 let warning_print = true;
 let info_print = true;
 
@@ -167,6 +167,14 @@ function remove_element_at_index(ind, array) {
 function remove_socket_from_array(sckt, array) {
     remove_element_at_index(get_element_index(sckt, array), array);
 }
+
+
+// function send_packet_to_clients(packet) {
+//     for (let i = 0; i < wsockets.length; ++i)
+//         wsockets[i].send(packet, { binary: true });
+//     for (let i = 0; i < dt_sockets.length; ++i)
+//         dt_sockets[i].write(packet);
+// }
 
 function send_packet_to_clients(packet, override_rate_limit = false) {
     for (let i = 0; i < wsockets.length; ++i) {
@@ -631,14 +639,14 @@ function run_child_process(name, args, send_err = false, send_output = false, se
     if (send_err) {
         proc.stderr.on("data", data => {
             let txt = data.toString();
-            send_console_text_to_clients(txt);
+            //send_console_text_to_clients(txt);
             ilog(`${name} stderr (sending to clients): ${txt}`);
         });
     }
     if (send_output) {
         proc.stdout.on("data", data => {
             let txt = data.toString();
-            send_console_text_to_clients(txt);
+            //send_console_text_to_clients(txt);
             ilog(`${name} stdout (sending to clients): ${txt}`);
         });
     }
@@ -713,11 +721,11 @@ function on_local_navp_msg(navmsg) {
 }
 
 function run_gmapping() {
-    return run_child_process("rosrun", ["gmapping", "slam_gmapping", "scan:=front/scan", "_delta:=0.05", "_xmin:=-1", "_xmax:=1", "_ymin:=-1", "_ymax:=1"]);
+    return run_child_process("roslaunch", ["uaf_jackal_navigation", "gmapping.launch"], true, true);
 }
 
 function run_jackal_navigation() {
-    return run_child_process("roslaunch", ["jackal_navigation", "move_base.launch"]);
+    return run_child_process("roslaunch", ["uaf_jackal_navigation", "move_base.launch"], true, true);
 }
 
 function update_param_check(cur_param_proc, pstack) {
@@ -760,10 +768,11 @@ rosnodejs.initNode("/command_server")
 
         // Subscribe to the occupancy grid map messages - send packet with the map info
         ros_node.subscribe("/map", "nav_msgs/OccupancyGrid",
-            (occ_grid_msg) => {
-                send_occ_grid_to_clients(occ_grid_msg, prev_frame_map_msg, map_header);
-                prev_frame_map_msg = occ_grid_msg;
-            });
+                           (occ_grid_msg) => {
+                               ilog("Should be sending map...");
+                               send_occ_grid_to_clients(occ_grid_msg, prev_frame_map_msg, map_header);
+                               prev_frame_map_msg = occ_grid_msg;
+                           });
 
         // Subscribe to the occupancy grid map messages - send packet with the map info
         ros_node.subscribe("/move_base/global_costmap/costmap", "nav_msgs/OccupancyGrid",
