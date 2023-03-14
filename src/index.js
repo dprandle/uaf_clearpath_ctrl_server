@@ -1073,12 +1073,12 @@ non_browser_server.on("listening", () => {
 
 // Serve up the emscripten generated main page
 app.get('/', function (req, res) {
-    res.sendFile(path.join(__dirname, 'emscripten', 'jackal_ctrl.html'));
+    res.sendFile(path.join(__dirname, 'emscripten', 'uaf_clearpath_ctrl.html'));
 });
 
 // Serve up the emscripten generated main page
 app.get('/control', function (req, res) {
-    res.sendFile(path.join(__dirname, 'emscripten', 'jackal_ctrl.html'));
+    res.sendFile(path.join(__dirname, 'emscripten', 'uaf_clearpath_ctrl.html'));
 });
 
 // The html shell above refernces other files in the same dir - make all files available (must use full path relative doesn't work)
