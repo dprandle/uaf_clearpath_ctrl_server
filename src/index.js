@@ -39,7 +39,6 @@ const IMAGE_PERIOD_CONST_MS = 150;
 
 let cmd_vel_pub = {};
 let cmd_goal_pub = {};
-let clear_map_client = {};
 let cancel_goal_pub = {};
 
 let cur_loc_navp_sub = "/move_base/TrajectoryPlannerROS/local_plan";
@@ -61,6 +60,7 @@ const misc_stats = {
 const MISC_STAT_PERIOD_MS = 1000;
 const MISC_STAT_AVG_CNT = 10;
 let total_cur_data_bytes = 0;
+let TS_START = Date.now();
 
 const scan_packet_header = {
     type: "SCAN_PCKT_ID"
@@ -142,13 +142,15 @@ const misc_stats_pckt_id = {
     type: "MISC_STATS_PCKT_ID"
 }
 
-let debug_print = true;
-let warning_print = true;
-let info_print = true;
+const debug_print = false;
+const warning_print = false;
+const info_print = false;
+const cm_print = true;
 
-function dlog(params) { debug_print && console.log(params); }
-function wlog(params) { warning_print && console.log(params); }
-function ilog(params) { info_print && console.log(params); }
+function dlog(params) { debug_print && console.log(`${Date.now() - TS_START}: ${params}`); }
+function wlog(params) { warning_print && console.log(`${Date.now() - TS_START}: ${params}`); }
+function ilog(params) { info_print && console.log(`${Date.now() - TS_START}: ${params}`); }
+function cm_log(params) { cm_print && console.log(`${Date.now() - TS_START},${params}`); }
 
 function get_element_index(value, array) {
     return array.findIndex((element) => { return value === element });
@@ -167,14 +169,6 @@ function remove_element_at_index(ind, array) {
 function remove_socket_from_array(sckt, array) {
     remove_element_at_index(get_element_index(sckt, array), array);
 }
-
-
-// function send_packet_to_clients(packet) {
-//     for (let i = 0; i < wsockets.length; ++i)
-//         wsockets[i].send(packet, { binary: true });
-//     for (let i = 0; i < dt_sockets.length; ++i)
-//         dt_sockets[i].write(packet);
-// }
 
 function send_packet_to_clients(packet, override_rate_limit = false) {
     for (let i = 0; i < wsockets.length; ++i) {
@@ -636,20 +630,21 @@ const param_stack = [];
 
 function run_child_process(name, args, send_err = false, send_output = false, send_success_confirm = false, success_confirm_text = '') {
     const proc = spawn(name, args);
-    if (send_err) {
-        proc.stderr.on("data", data => {
+    proc.stderr.on("data", data => {
+        if (send_err) {
             let txt = data.toString();
-            //send_console_text_to_clients(txt);
+            send_console_text_to_clients(txt);
             ilog(`${name} stderr (sending to clients): ${txt}`);
-        });
-    }
-    if (send_output) {
-        proc.stdout.on("data", data => {
+        }
+    });
+
+    proc.stdout.on("data", data => {
+        if (send_output) {
             let txt = data.toString();
-            //send_console_text_to_clients(txt);
+            send_console_text_to_clients(txt);
             ilog(`${name} stdout (sending to clients): ${txt}`);
-        });
-    }
+        }
+    });
     proc.on('error', (error) => {
         ilog(`${name} error: ${error.message}`);
     });
@@ -720,18 +715,23 @@ function on_local_navp_msg(navmsg) {
     send_packet_to_clients(packet);
 }
 
-function run_gmapping() {
-    return run_child_process("roslaunch", ["uaf_jackal_navigation", "gmapping.launch"], true, true);
+function run_navigation_gmapping() {
+    return run_child_process("roslaunch", ["uaf_jackal_navigation", "gmapping.launch"], false, false);
 }
 
-function run_jackal_navigation() {
+function run_navigation_move_base() {
     return run_child_process("roslaunch", ["uaf_jackal_navigation", "move_base.launch"], true, true);
 }
 
 function update_param_check(cur_param_proc, pstack) {
+    // If param items are available and we aren't waiting on another parameter
+    // process to finish, process the next item.
     if (!cur_param_proc && pstack.length !== 0) {
         const pobj = pstack.shift();
         let msg = `Setting node ${pobj.node} parameter ${pobj.param_name} to ${JSON.stringify(pobj.param_val)}`;
+
+        // Spawn a child process using dynamic_reconfigure to set the parameter for the node - this will most likely
+        // kill and restart the node
         cur_param_proc = run_child_process("rosrun", ["dynamic_reconfigure", "dynparam", "set", pobj.node, pobj.param_name, pobj.param_val], true, true, true, msg);
         setTimeout(proc_timeout, 20000, cur_param_proc);
         ilog(msg);
@@ -743,7 +743,7 @@ let avg_array = [];
 function update_and_send_misc_stats()
 {
     misc_stats.conn_count = dt_sockets.length + wsockets.length;
-    misc_stats.cur_bw_mbps = (total_cur_data_bytes*1000) / (MISC_STAT_PERIOD_MS*(1024*1024));
+    misc_stats.cur_bw_mbps = (total_cur_data_bytes*8000) / (MISC_STAT_PERIOD_MS*1048576);
     total_cur_data_bytes = 0;
     avg_array.push(misc_stats.cur_bw_mbps);
     if (avg_array.length > MISC_STAT_AVG_CNT)
@@ -759,52 +759,56 @@ function update_and_send_misc_stats()
 rosnodejs.initNode("/command_server")
     .then((ros_node) => {
 
-        gmapping_proc = run_gmapping();
-        run_jackal_navigation();
+        gmapping_proc = run_navigation_gmapping();
+        navigation_proc = run_navigation_move_base();
 
-        setInterval(send_tforms, 30, frame_tforms);
-        setInterval(update_param_check, 30, cur_param_proc, param_stack);
+        setInterval(send_tforms, 16, frame_tforms);
+        setInterval(update_param_check, 100, cur_param_proc, param_stack);
         setInterval(update_and_send_misc_stats, MISC_STAT_PERIOD_MS);
 
         // Subscribe to the occupancy grid map messages - send packet with the map info
         ros_node.subscribe("/map", "nav_msgs/OccupancyGrid",
                            (occ_grid_msg) => {
                                ilog("Should be sending map...");
+                               cm_log(`${occ_grid_msg.info.height*occ_grid_msg.info.width},,`);
                                send_occ_grid_to_clients(occ_grid_msg, prev_frame_map_msg, map_header);
                                prev_frame_map_msg = occ_grid_msg;
                            });
 
         // Subscribe to the occupancy grid map messages - send packet with the map info
         ros_node.subscribe("/move_base/global_costmap/costmap", "nav_msgs/OccupancyGrid",
-            (occ_grid_msg) => {
-                send_occ_grid_to_clients(occ_grid_msg, prev_frame_glob_cm_msg, glob_cm_header);
-                prev_frame_glob_cm_msg = occ_grid_msg;
-                ilog("Global costmap full update");
-            });
+                           (occ_grid_msg) => {
+//                               cm_log(`global_costmap, ${occ_grid_msg.info.height*occ_grid_msg.info.width}`);
+                               send_occ_grid_to_clients(occ_grid_msg, prev_frame_glob_cm_msg, glob_cm_header);
+                               prev_frame_glob_cm_msg = occ_grid_msg;
+                               ilog("Global costmap full update");
+                           });
 
         // Subscribe to the occupancy grid map messages - send packet with the map info
         ros_node.subscribe("/move_base/global_costmap/costmap_updates", "map_msgs/OccupancyGridUpdate",
-            (occ_grid_msg) => {
-                send_occ_grid_from_update_to_clients(occ_grid_msg, prev_frame_glob_cm_msg, glob_cm_header);
-            });
+                           (occ_grid_msg) => {
+                               cm_log(`,${occ_grid_msg.height*occ_grid_msg.width},`);
+                               send_occ_grid_from_update_to_clients(occ_grid_msg, prev_frame_glob_cm_msg, glob_cm_header);
+                           });
 
         // Subscribe to the occupancy grid map messages - send packet with the map info
         ros_node.subscribe("/move_base/local_costmap/costmap", "nav_msgs/OccupancyGrid",
-            (occ_grid_msg) => {
-                send_occ_grid_to_clients(occ_grid_msg, prev_frame_loc_cm_msg, loc_cm_header);
-                prev_frame_loc_cm_msg = occ_grid_msg;
-            });
+                           (occ_grid_msg) => {
+                               cm_log(`,,${occ_grid_msg.info.height*occ_grid_msg.info.width}`);
+                               send_occ_grid_to_clients(occ_grid_msg, prev_frame_loc_cm_msg, loc_cm_header);
+                               prev_frame_loc_cm_msg = occ_grid_msg;
+                           });
 
         // Subscribe to the transform topic - send packets for each transform
         ros_node.subscribe("/tf", "tf2_msgs/TFMessage",
-            (tf_message) => {
-                convert_tforms_key_val(tf_message, frame_tforms);
-            });
+                           (tf_message) => {
+                               convert_tforms_key_val(tf_message, frame_tforms);
+                           });
 
         ros_node.subscribe("/tf_static", "tf2_msgs/TFMessage",
-            (tf_message) => {
-                convert_tforms_key_val(tf_message, static_tforms);
-            });
+                           (tf_message) => {
+                               convert_tforms_key_val(tf_message, static_tforms);
+                           });
 
         ros_node.subscribe(cur_glob_navp_sub, "nav_msgs/Path", on_global_navp_msg);
 
@@ -812,34 +816,33 @@ rosnodejs.initNode("/command_server")
 
         // Subscribe to the laser scan messages - send a packet with the scan info
         ros_node.subscribe("/front/scan", "sensor_msgs/LaserScan",
-            (scan) => {
-                if (!at_least_one_socket_ready())
-                    return;
-                const packet = new Buffer.alloc(get_scan_packet_size(scan));
-                add_scan_to_packet(scan, packet, 0);
-                send_packet_to_clients(packet);
-            }, { throttleMs: 100 });
+                           (scan) => {
+                               if (!at_least_one_socket_ready())
+                                   return;
+                               const packet = new Buffer.alloc(get_scan_packet_size(scan));
+                               add_scan_to_packet(scan, packet, 0);
+                               send_packet_to_clients(packet);
+                           }, { throttleMs: 100 });
 
         ros_node.subscribe("/move_base/status", "actionlib_msgs/GoalStatusArray",
-            (status_msg) => {
-                current_goal_status_msg.status_list = status_msg.status_list;
-                if (!at_least_one_socket_ready())
-                    return;
-                const packet = new Buffer.alloc(get_goal_status_packet_size());
-                add_goal_stat_to_packet(current_goal_status_msg, packet, 0);
-                send_packet_to_clients(packet);
-            });
+                           (status_msg) => {
+                               current_goal_status_msg.status_list = status_msg.status_list;
+                               if (!at_least_one_socket_ready())
+                                   return;
+                               const packet = new Buffer.alloc(get_goal_status_packet_size());
+                               add_goal_stat_to_packet(current_goal_status_msg, packet, 0);
+                               send_packet_to_clients(packet);
+                           });
 
         ros_node.subscribe("move_base/goal", "move_base_msgs/MoveBaseActionGoal",
-            (goal_msg) => {
-                current_goal_status_msg.cur_goal = goal_msg.goal;
-                current_goal_status_msg.cur_goal_stamp = goal_msg.header.stamp;
-            });
+                           (goal_msg) => {
+                               current_goal_status_msg.cur_goal = goal_msg.goal;
+                               current_goal_status_msg.cur_goal_stamp = goal_msg.header.stamp;
+                           });
 
         cmd_vel_pub = rosnodejs.nh.advertise('/cmd_vel', 'geometry_msgs/Twist');
         cmd_goal_pub = rosnodejs.nh.advertise('/move_base_simple/goal', 'geometry_msgs/PoseStamped');
         cancel_goal_pub = rosnodejs.nh.advertise('/move_base/cancel', 'actionlib_msgs/GoalID');
-        clear_map_client = rosnodejs.nh.serviceClient('/move_base/clear_costmaps', 'std_srvs/Empty');
     });
 
 function proc_timeout(proc) {
@@ -855,17 +858,17 @@ function subscribe_for_image_topic(ros_node, image_reqs) {
         const ms_period = PER_IMAGE_MS_DELAY * subscriber_count + (wsockets.length + dt_sockets.length) * PER_CONNECT_MS_DELAY - IMAGE_PERIOD_CONST_MS;
         ilog(`Subscribing to image topic at period of ${ms_period} ms`);
         return ros_node.subscribe("/camera/left/image_color/compressed", "sensor_msgs/CompressedImage",
-            (comp_image) => {
-                if (!at_least_one_socket_ready())
-                    return;
-                const packet = new Buffer.alloc(get_compressed_image_header_packet_size(comp_image));
-                add_compressed_image_header_to_packet(comp_image, packet, 0);
-                // Send the image header info
-                send_packet_to_clients(packet);
-                
-                // Just send the data blob from the image directly - no need to copy to the array buffer packet
-                send_packet_to_clients(comp_image.data);
-            }, { throttleMs: ms_period });
+                                  (comp_image) => {
+                                      if (!at_least_one_socket_ready())
+                                          return;
+                                      const packet = new Buffer.alloc(get_compressed_image_header_packet_size(comp_image));
+                                      add_compressed_image_header_to_packet(comp_image, packet, 0);
+                                      // Send the image header info
+                                      send_packet_to_clients(packet);
+                                      
+                                      // Just send the data blob from the image directly - no need to copy to the array buffer packet
+                                      send_packet_to_clients(comp_image.data);
+                                  }, { throttleMs: ms_period });
     }
     return null;
 }
@@ -985,12 +988,13 @@ function parse_incoming_data(data, sckt) {
     }
     else if (hdr === clear_maps_cmd_header.type) {
         ilog(`Got clear maps command`);
+        navigation_proc.kill('SIGINT');
         gmapping_proc.kill('SIGINT');
         prev_frame_glob_cm_msg = {};
-        prev_frame_map_msg = {};
-        clear_map_client.call();
-        gmapping_proc = run_gmapping();
-        send_console_text_to_clients("Cleared costmaps and restarted gmapping");
+        prev_frame_map_msg = {};        
+        gmapping_proc = run_navigation_gmapping();
+        navigation_proc = run_navigation_move_base();
+        send_console_text_to_clients("Cleared maps and restarted navigation nodes");
     }
     else if (hdr === set_params_cmd_header.type) {
         let cmd_obj = parse_param_cmd(data);
