@@ -147,12 +147,23 @@ const warning_print = false;
 const info_print = false;
 const cm_print = false;
 const cm2_print = false;
-
+const cam_log = true;
+    misc_stats.conn_count = dt_sockets.length + wsockets.length;
+    misc_stats.cur_bw_mbps = (total_cur_data_bytes*8000) / (MISC_STAT_PERIOD_MS*1048576);
+    total_cur_data_bytes = 0;
+    avg_array.push(misc_stats.cur_bw_mbps);
+    if (avg_array.length > MISC_STAT_AVG_CNT)
+        avg_array.shift();
+    misc_stats.avg_bw_mbps
 function dlog(params) { debug_print && console.log(`${Date.now() - TS_START}: ${params}`); }
 function wlog(params) { warning_print && console.log(`${Date.now() - TS_START}: ${params}`); }
 function ilog(params) { info_print && console.log(`${Date.now() - TS_START}: ${params}`); }
 function cm_log(params) { cm_print && console.log(`${Date.now() - TS_START},${params}`); }
 function cm2_log(params) { cm2_print && console.log(`${Date.now() - TS_START},${params}`); }
+
+function cam_log() {
+    cm2_print && console.log(`${Date.now() - TS_START},${misc_stats.conn_count},${image_requestors.length},${misc_stats.cur_bw_mbps},${misc_stats.avg_bw_mbps}`);
+}
 
 function get_element_index(value, array) {
     return array.findIndex((element) => { return value === element });
@@ -864,6 +875,7 @@ function subscribe_for_image_topic(ros_node, image_reqs) {
     const subscriber_count = image_reqs.length;
     if (subscriber_count > 0) {
         const ms_period = PER_IMAGE_MS_DELAY * subscriber_count + (wsockets.length + dt_sockets.length) * PER_CONNECT_MS_DELAY - IMAGE_PERIOD_CONST_MS;
+        
         ilog(`Subscribing to image topic at period of ${ms_period} ms`);
         return ros_node.subscribe("/camera/left/image_color/compressed", "sensor_msgs/CompressedImage",
                                   (comp_image) => {
