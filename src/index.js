@@ -145,12 +145,14 @@ const misc_stats_pckt_id = {
 const debug_print = false;
 const warning_print = false;
 const info_print = false;
-const cm_print = true;
+const cm_print = false;
+const cm2_print = false;
 
 function dlog(params) { debug_print && console.log(`${Date.now() - TS_START}: ${params}`); }
 function wlog(params) { warning_print && console.log(`${Date.now() - TS_START}: ${params}`); }
 function ilog(params) { info_print && console.log(`${Date.now() - TS_START}: ${params}`); }
 function cm_log(params) { cm_print && console.log(`${Date.now() - TS_START},${params}`); }
+function cm2_log(params) { cm2_print && console.log(`${Date.now() - TS_START},${params}`); }
 
 function get_element_index(value, array) {
     return array.findIndex((element) => { return value === element });
@@ -466,7 +468,7 @@ function send_occ_grid_from_update_to_clients(update_msg, prev_frame_og_msg, hea
     }
 
     const frame_changes = get_changes_and_apply_update_to_occgrid(update_msg, prev_frame_og_msg);
-
+    cm2_log(`,,${frame_changes.length*4}`);
     // Only create the packet and send it if there are clients connected
     if (total_connections > 0) {
         const packet_size = get_occgrid_packet_size(frame_changes);
@@ -492,6 +494,12 @@ function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg, header) {
     // We don't need to send the entire costmap every update - instead just send the size of the costmap and changes
     // since the last update    
     const frame_changes = get_occ_grid_delta(cur_occ_grid_msg.data, occ_data);
+
+    if (header == map_header) {
+        cm2_log(`${frame_changes.length*4},,`);
+    } else {
+        cm2_log(`,${frame_changes.length*4},`);
+    }
 
     // Only create the packet and send it if there are clients connected
     if (total_connections > 0) {
