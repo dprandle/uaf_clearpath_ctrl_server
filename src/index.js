@@ -145,10 +145,11 @@ const misc_stats_pckt_id = {
 
 const debug_print = false;
 const warning_print = false;
-const info_print = false;
+const info_print = true;
 const cm_print = false;
 const cm2_print = false;
-const cam_print = true;
+const cam_print = false;
+const misc_stats_print = true;
 
 function dlog(params) { debug_print && console.log(`${Date.now() - TS_START}: ${params}`); }
 function wlog(params) { warning_print && console.log(`${Date.now() - TS_START}: ${params}`); }
@@ -158,6 +159,10 @@ function cm2_log(params) { cm2_print && console.log(`${Date.now() - TS_START},${
 
 function cam_log() {
     cam_print && console.log(`${Date.now() - TS_START},${misc_stats.conn_count},${image_requestors.length},${misc_stats.cur_bw_mbps},${misc_stats.avg_bw_mbps}`);
+}
+
+function misc_stats_log() {
+    misc_stats_print && console.log(`${Date.now() - TS_START},${misc_stats.conn_count},${misc_stats.missed_packets},${misc_stats.cur_bw_mbps},${misc_stats.avg_bw_mbps}`);
 }
 
 function get_element_index(value, array) {
@@ -183,6 +188,9 @@ function send_packet_to_clients(packet, override_rate_limit = false) {
         if (wsockets[i].bufferedAmount == 0 || override_rate_limit) {
             wsockets[i].send(packet, { binary: true });
             total_cur_data_bytes += packet.length;
+        } else {
+            misc_stats.missed_packets += 1;
+            ilog("GHEREARESRASDFASDF");
         }
     }
     for (let i = 0; i < dt_sockets.length; ++i) {
@@ -192,6 +200,9 @@ function send_packet_to_clients(packet, override_rate_limit = false) {
                 dt_sockets[i].ready_for_more_data = true;
                 total_cur_data_bytes += packet.length;
             });
+        } else {
+            ilog("Desktop GHEREARESRASDFASDF");
+            misc_stats.missed_packets += 1;
         }
     }
 }
@@ -210,28 +221,40 @@ function write_packet_header(packet_header, packet, offset) {
     return write_packet_string(packet_header.type, PACKET_STR_ID_LEN, packet, offset);
 }
 
-function at_least_one_socket_ready() {
+function connected_client_count() {
+    return wsockets.length + dt_sockets.length;
+}
+
+function ready_socket_count() {
+    let ret = 0;
     for (let i = 0; i < wsockets.length; ++i) {
-        if (wsockets[i].bufferedAmount == 0)
-            return true;
+        if (wsockets[i].bufferedAmount == 0) {
+            ++ret;
+        }
     }
     for (let i = 0; i < dt_sockets.length; ++i) {
         if (dt_sockets[i].ready_for_more_data)
-            return true;
+            ++ret;
     }
-    return false;
+    return ret;
+}
+
+function at_least_one_client_ready() {
+    const ready_cnt = ready_socket_count();
+    if (ready_cnt < 1) {
+        if (connected_client_count() > 0) {
+            ilog(`Add ${connected_client_count()} to missed`);
+        }
+        misc_stats.missed_packets += connected_client_count();
+    }
+    return ready_cnt > 0;
 }
 
 function all_sockets_ready() {
-    for (let i = 0; i < wsockets.length; ++i) {
-        if (wsockets[i].bufferedAmount != 0)
-            return false;
-    }
-    for (let i = 0; i < dt_sockets.length; ++i) {
-        if (!dt_sockets[i].ready_for_more_data)
-            return false;
-    }
-    return true;
+    const ready_cnt = ready_socket_count();
+    const conn_cnt = connected_client_count();
+    misc_stats.missed_packets += (conn_cnt - ready_cnt);
+    return (conn_cnt === ready_cnt);
 }
 
 function sum_elements(array)
@@ -477,12 +500,8 @@ function parse_goal_cmd(buf) {
 }
 
 function send_occ_grid_from_update_to_clients(update_msg, prev_frame_og_msg, header) {
-    if (!all_sockets_ready())
-        return;
-    
-    // Used to see if we need to send the packet at all
-    const total_connections = wsockets.length + dt_sockets.length;
-
+    // We have to override the rate limit because we are receiving costmap updates from ROS - we gotta apply these
+    // to our data, and then we gotta send those changes when we do
     if (!('data' in prev_frame_og_msg)) {
         ilog("Cannot send costmap update - haven't got original costmap yet");
         return;
@@ -491,21 +510,22 @@ function send_occ_grid_from_update_to_clients(update_msg, prev_frame_og_msg, hea
     const frame_changes = get_changes_and_apply_update_to_occgrid(update_msg, prev_frame_og_msg);
     cm2_log(`,,${frame_changes.length*4}`);
     // Only create the packet and send it if there are clients connected
-    if (total_connections > 0) {
+    if (connected_client_count() > 0) {
         const packet_size = get_occgrid_packet_size(frame_changes);
         const packet = new Buffer.alloc(packet_size);
         add_occgrid_to_packet(prev_frame_og_msg, frame_changes, header, 0, packet, 0);
-        send_packet_to_clients(packet, override_rate_limit);
+        send_packet_to_clients(packet, true);
     }
 }
 
 function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg, header, override_rate_limit=false) {
     
-    if (!all_sockets_ready() && !override_rate_limit)
+    if (!override_rate_limit && !all_sockets_ready()) {
         return;
+    }
     
     // Used to see if we need to send the packet at all
-    const total_connections = wsockets.length + dt_sockets.length;
+    const total_connections = connected_client_count();
 
     // If we haven't received any messages yet there will be no data member in prev_occ_grid_msg
     let reset_map = 1;
@@ -636,12 +656,18 @@ function get_text_block_packet_size(text_to_send) {
 }
 
 function send_tforms(tforms) {
+    if (!at_least_one_client_ready()) {
+        return;
+    }
     const packet = new Buffer.alloc(get_transforms_packet_size(tforms));
     add_transforms_to_packet(tforms, packet, 0);
     send_packet_to_clients(packet);
 }
 
 function send_text_packet_to_clients(text, header) {
+    if (!at_least_one_client_ready()) {
+        return;
+    }
     let offset = 0;
     let packet_size = get_text_block_packet_size(text);
     const packet = new Buffer.alloc(packet_size);
@@ -732,16 +758,21 @@ function run_child_process(name, args, send_err = false, send_output = false, se
 }
 
 function on_global_navp_msg(navmsg) {
-    if (!at_least_one_socket_ready())
+    // Totally skip if no sockets are ready
+    if (!at_least_one_client_ready()) {
         return;
+    }
+
     const packet = new Buffer.alloc(get_navp_packet_size(navmsg));
     add_navp_to_packet(navmsg, glob_navp_pcket_header, packet, 0);
     send_packet_to_clients(packet);
 }
 
 function on_local_navp_msg(navmsg) {
-    if (!at_least_one_socket_ready())
+    if (!at_least_one_client_ready()) {
         return;
+    }
+
     const packet = new Buffer.alloc(get_navp_packet_size(navmsg));
     add_navp_to_packet(navmsg, loc_navp_pcket_header, packet, 0);
     send_packet_to_clients(packet);
@@ -770,20 +801,34 @@ function update_param_check(cur_param_proc, pstack) {
     }
 }
 
-let avg_array = [];
+const avg_array = [];
+const RESET_PACKET_LOSS = 10;
+let cur_packet_loss_count = 0;
 
 function update_and_send_misc_stats()
 {
-    misc_stats.conn_count = dt_sockets.length + wsockets.length;
+    misc_stats.conn_count = connected_client_count();
     misc_stats.cur_bw_mbps = (total_cur_data_bytes*8000) / (MISC_STAT_PERIOD_MS*1048576);
     total_cur_data_bytes = 0;
+    
     avg_array.push(misc_stats.cur_bw_mbps);
-    if (avg_array.length > MISC_STAT_AVG_CNT)
+    if (avg_array.length > MISC_STAT_AVG_CNT) {
         avg_array.shift();
+    }
     misc_stats.avg_bw_mbps = sum_elements(avg_array) / avg_array.length;
 
-    cam_log();
+    misc_stats_log();
 
+    ++cur_packet_loss_count;
+    if (cur_packet_loss_count === RESET_PACKET_LOSS) {
+        cur_packet_loss_count = 0;
+        misc_stats.missed_packets = 0;
+    }
+    
+
+    if (!at_least_one_client_ready()) {
+        return;
+    }
     const packet = new Buffer.alloc(get_misc_stats_packet_size());
     add_misc_stats_to_packet(misc_stats, packet, 0);
     send_packet_to_clients(packet);
@@ -812,7 +857,7 @@ rosnodejs.initNode("/command_server")
         // Subscribe to the occupancy grid map messages - send packet with the map info
         ros_node.subscribe("/move_base/global_costmap/costmap", "nav_msgs/OccupancyGrid",
                            (occ_grid_msg) => {
-//                               cm_log(`global_costmap, ${occ_grid_msg.info.height*occ_grid_msg.info.width}`);
+                               // cm_log(`global_costmap, ${occ_grid_msg.info.height*occ_grid_msg.info.width}`);
                                send_occ_grid_to_clients(occ_grid_msg, prev_frame_glob_cm_msg, glob_cm_header, true);
                                prev_frame_glob_cm_msg = occ_grid_msg;
                                ilog("Global costmap full update");
@@ -851,8 +896,11 @@ rosnodejs.initNode("/command_server")
         // Subscribe to the laser scan messages - send a packet with the scan info
         ros_node.subscribe("/front/scan", "sensor_msgs/LaserScan",
                            (scan) => {
-                               if (!at_least_one_socket_ready())
+                               // Totally skip if no sockets are ready
+                               if (!at_least_one_client_ready()) {
                                    return;
+                               }
+
                                const packet = new Buffer.alloc(get_scan_packet_size(scan));
                                add_scan_to_packet(scan, packet, 0);
                                send_packet_to_clients(packet);
@@ -861,8 +909,12 @@ rosnodejs.initNode("/command_server")
         ros_node.subscribe("/move_base/status", "actionlib_msgs/GoalStatusArray",
                            (status_msg) => {
                                current_goal_status_msg.status_list = status_msg.status_list;
-                               if (!at_least_one_socket_ready())
+
+                               // Totally skip if no sockets are ready
+                               if (!at_least_one_client_ready()) {
                                    return;
+                               }
+                               
                                const packet = new Buffer.alloc(get_goal_status_packet_size());
                                add_goal_stat_to_packet(current_goal_status_msg, packet, 0);
                                send_packet_to_clients(packet);
@@ -889,13 +941,16 @@ function proc_timeout(proc) {
 function subscribe_for_image_topic(ros_node, image_reqs) {
     const subscriber_count = image_reqs.length;
     if (subscriber_count > 0) {
-        const ms_period = PER_IMAGE_MS_DELAY * subscriber_count + (wsockets.length + dt_sockets.length) * PER_CONNECT_MS_DELAY - IMAGE_PERIOD_CONST_MS;
+        const ms_period = PER_IMAGE_MS_DELAY * subscriber_count + connected_client_count() * PER_CONNECT_MS_DELAY - IMAGE_PERIOD_CONST_MS;
         
         ilog(`Subscribing to image topic at period of ${ms_period} ms`);
         return ros_node.subscribe("/camera/left/image_color/compressed", "sensor_msgs/CompressedImage",
                                   (comp_image) => {
-                                      if (!at_least_one_socket_ready())
+                                      // Totally skip if no sockets are ready
+                                      if (!at_least_one_client_ready()) {
                                           return;
+                                      }
+
                                       const packet = new Buffer.alloc(get_compressed_image_header_packet_size(comp_image));
                                       add_compressed_image_header_to_packet(comp_image, packet, 0);
                                       // Send the image header info
