@@ -147,14 +147,8 @@ const warning_print = false;
 const info_print = false;
 const cm_print = false;
 const cm2_print = false;
-const cam_log = true;
-    misc_stats.conn_count = dt_sockets.length + wsockets.length;
-    misc_stats.cur_bw_mbps = (total_cur_data_bytes*8000) / (MISC_STAT_PERIOD_MS*1048576);
-    total_cur_data_bytes = 0;
-    avg_array.push(misc_stats.cur_bw_mbps);
-    if (avg_array.length > MISC_STAT_AVG_CNT)
-        avg_array.shift();
-    misc_stats.avg_bw_mbps
+const cam_print = true;
+
 function dlog(params) { debug_print && console.log(`${Date.now() - TS_START}: ${params}`); }
 function wlog(params) { warning_print && console.log(`${Date.now() - TS_START}: ${params}`); }
 function ilog(params) { info_print && console.log(`${Date.now() - TS_START}: ${params}`); }
@@ -162,7 +156,7 @@ function cm_log(params) { cm_print && console.log(`${Date.now() - TS_START},${pa
 function cm2_log(params) { cm2_print && console.log(`${Date.now() - TS_START},${params}`); }
 
 function cam_log() {
-    cm2_print && console.log(`${Date.now() - TS_START},${misc_stats.conn_count},${image_requestors.length},${misc_stats.cur_bw_mbps},${misc_stats.avg_bw_mbps}`);
+    cam_print && console.log(`${Date.now() - TS_START},${misc_stats.conn_count},${image_requestors.length},${misc_stats.cur_bw_mbps},${misc_stats.avg_bw_mbps}`);
 }
 
 function get_element_index(value, array) {
@@ -768,6 +762,8 @@ function update_and_send_misc_stats()
     if (avg_array.length > MISC_STAT_AVG_CNT)
         avg_array.shift();
     misc_stats.avg_bw_mbps = sum_elements(avg_array) / avg_array.length;
+
+    cam_log();
 
     const packet = new Buffer.alloc(get_misc_stats_packet_size());
     add_misc_stats_to_packet(misc_stats, packet, 0);
