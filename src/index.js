@@ -53,6 +53,7 @@ let current_goal_status_msg = {};
 
 const misc_stats = {
     conn_count: 0,
+    missed_packets: 0,
     cur_bw_mbps: 0,
     avg_bw_mbps: 0
 };
@@ -224,6 +225,19 @@ function at_least_one_socket_ready() {
         if (dt_sockets[i].ready_for_more_data)
             return true;
     }
+    return false;
+}
+
+function all_sockets_ready() {
+    for (let i = 0; i < wsockets.length; ++i) {
+        if (wsockets[i].bufferedAmount != 0)
+            return false;
+    }
+    for (let i = 0; i < dt_sockets.length; ++i) {
+        if (!dt_sockets[i].ready_for_more_data)
+            return false;
+    }
+    return true;
 }
 
 function sum_elements(array)
@@ -469,7 +483,9 @@ function parse_goal_cmd(buf) {
 }
 
 function send_occ_grid_from_update_to_clients(update_msg, prev_frame_og_msg, header) {
-
+    if (!all_sockets_ready())
+        return;
+    
     // Used to see if we need to send the packet at all
     const total_connections = wsockets.length + dt_sockets.length;
 
@@ -485,12 +501,15 @@ function send_occ_grid_from_update_to_clients(update_msg, prev_frame_og_msg, hea
         const packet_size = get_occgrid_packet_size(frame_changes);
         const packet = new Buffer.alloc(packet_size);
         add_occgrid_to_packet(prev_frame_og_msg, frame_changes, header, 0, packet, 0);
-        send_packet_to_clients(packet);
+        send_packet_to_clients(packet, override_rate_limit);
     }
 }
 
-function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg, header) {
-
+function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg, header, override_rate_limit=false) {
+    
+    if (!all_sockets_ready() && !override_rate_limit)
+        return;
+    
     // Used to see if we need to send the packet at all
     const total_connections = wsockets.length + dt_sockets.length;
 
@@ -518,7 +537,7 @@ function send_occ_grid_to_clients(cur_occ_grid_msg, prev_occ_grid_msg, header) {
         const packet = new Buffer.alloc(packet_size);
         add_occgrid_to_packet(cur_occ_grid_msg, frame_changes, header, reset_map, packet, 0);
         dlog(`Sending occ grid packet ${JSON.stringify(header)} (${packet.length}B or ${packet.length / MB_SIZE}MB) to ${total_connections} clients`);
-        send_packet_to_clients(packet, true);
+        send_packet_to_clients(packet, override_rate_limit);
     }
 }
 
@@ -798,7 +817,7 @@ rosnodejs.initNode("/command_server")
         ros_node.subscribe("/move_base/global_costmap/costmap", "nav_msgs/OccupancyGrid",
                            (occ_grid_msg) => {
 //                               cm_log(`global_costmap, ${occ_grid_msg.info.height*occ_grid_msg.info.width}`);
-                               send_occ_grid_to_clients(occ_grid_msg, prev_frame_glob_cm_msg, glob_cm_header);
+                               send_occ_grid_to_clients(occ_grid_msg, prev_frame_glob_cm_msg, glob_cm_header, true);
                                prev_frame_glob_cm_msg = occ_grid_msg;
                                ilog("Global costmap full update");
                            });
