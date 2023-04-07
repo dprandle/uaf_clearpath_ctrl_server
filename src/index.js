@@ -29,7 +29,8 @@ const JACKAL_HOSTNAME = "cpr-uaf01";
 const HUSKY_HOSTNAME = "cpr-uaf02-husky";
 const ROBOT_HOSTNAME = os.hostname();
 const IS_JACKAL = (ROBOT_HOSTNAME === JACKAL_HOSTNAME);
-const IS_HUSKY = (ROBOT_HOSTNAME === HUSKY_HOSTNAME);
+const NAV_PACKAGE_NAME = (IS_JACKAL)?"uaf_jackal_navigation":"uaf_husky_navigation";
+const SCAN_TOPIC_NAME = (IS_JACKAL)?"/front/scan":"/scan";
 
 let jackal_cam_sub = null;
 let image_requestors = [];
@@ -143,12 +144,12 @@ const misc_stats_pckt_id = {
     type: "MISC_STATS_PCKT_ID"
 }
 
-const debug_print = false;
-const warning_print = false;
-const info_print = false;
+const debug_print = true;
+const warning_print = true;
+const info_print = true;
 const cm_print = false;
 const cm2_print = false;
-const cam_print = true;
+const cam_print = false;
 
 function dlog(params) { debug_print && console.log(`${Date.now() - TS_START}: ${params}`); }
 function wlog(params) { warning_print && console.log(`${Date.now() - TS_START}: ${params}`); }
@@ -495,7 +496,7 @@ function send_occ_grid_from_update_to_clients(update_msg, prev_frame_og_msg, hea
         const packet_size = get_occgrid_packet_size(frame_changes);
         const packet = new Buffer.alloc(packet_size);
         add_occgrid_to_packet(prev_frame_og_msg, frame_changes, header, 0, packet, 0);
-        send_packet_to_clients(packet, override_rate_limit);
+        send_packet_to_clients(packet, true);
     }
 }
 
@@ -748,11 +749,11 @@ function on_local_navp_msg(navmsg) {
 }
 
 function run_navigation_gmapping() {
-    return run_child_process("roslaunch", ["uaf_jackal_navigation", "gmapping.launch"], false, false);
+    return run_child_process("roslaunch", [NAV_PACKAGE_NAME, "gmapping.launch"], false, false);
 }
 
 function run_navigation_move_base() {
-    return run_child_process("roslaunch", ["uaf_jackal_navigation", "move_base.launch"], true, true);
+    return run_child_process("roslaunch", [NAV_PACKAGE_NAME, "move_base.launch"], true, true);
 }
 
 function update_param_check(cur_param_proc, pstack) {
@@ -849,7 +850,7 @@ rosnodejs.initNode("/command_server")
         ros_node.subscribe(cur_loc_navp_sub, "nav_msgs/Path", on_local_navp_msg);
 
         // Subscribe to the laser scan messages - send a packet with the scan info
-        ros_node.subscribe("/front/scan", "sensor_msgs/LaserScan",
+        ros_node.subscribe(SCAN_TOPIC_NAME, "sensor_msgs/LaserScan",
                            (scan) => {
                                if (!at_least_one_socket_ready())
                                    return;
