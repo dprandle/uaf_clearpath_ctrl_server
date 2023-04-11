@@ -1,7 +1,7 @@
 {
-  "name": "jackal_control_server",
+  "name": "uaf_clearpath_ctrl_server",
   "version": "1.0.0",
-  "description": "Server running on jackal which serves an emscripten generated html page for controlling the jackal, along with providing ROS messages of interest back to the browser. ",
+  "description": "Server running on Jackal/Husky which serves an emscripten generated html page for controlling the jackal, along with providing ROS messages of interest back to the browser. ",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
