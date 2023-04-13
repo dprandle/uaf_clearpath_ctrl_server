@@ -19,7 +19,8 @@ const wss = new wss_lib.Server({ noServer: true });
 const wsockets = [];
 const dt_sockets = [];
 const desktop_server_port = 4000;
-const http_server_port = 8080;
+
+const http_server_port = (process.env.IS_SIMULATION === "1")?8080:80;
 
 const PACKET_STR_ID_LEN = 32;
 const TFORM_NODE_NAME_LEN = 32;
@@ -28,9 +29,10 @@ const MB_SIZE = 1024 * KB_SIZE;
 const JACKAL_HOSTNAME = "cpr-uaf01";
 const HUSKY_HOSTNAME = "cpr-uaf02-husky";
 const ROBOT_HOSTNAME = os.hostname();
-const IS_JACKAL = (ROBOT_HOSTNAME === JACKAL_HOSTNAME);
-const NAV_PACKAGE_NAME = (IS_JACKAL)?"uaf_jackal_navigation":"uaf_husky_navigation";
-const SCAN_TOPIC_NAME = (IS_JACKAL)?"/front/scan":"/scan";
+
+const IS_JACKAL = ((ROBOT_HOSTNAME === JACKAL_HOSTNAME) || (process.env.IS_JACKAL === "1"));
+let NAV_PACKAGE_NAME = (IS_JACKAL)?"uaf_jackal_navigation":"uaf_husky_navigation";
+const SCAN_TOPIC_NAME = ((IS_JACKAL === 1) || (process.env.IS_SIMULATION === "1"))?"front/scan":"scan";
 
 let jackal_cam_sub = null;
 let image_requestors = [];
@@ -157,6 +159,11 @@ function wlog(params) { warning_print && console.log(`${Date.now() - TS_START}: 
 function ilog(params) { info_print && console.log(`${Date.now() - TS_START}: ${params}`); }
 function cm_log(params) { cm_print && console.log(`${Date.now() - TS_START},${params}`); }
 function cm2_log(params) { cm2_print && console.log(`${Date.now() - TS_START},${params}`); }
+
+// const IS_JACKAL = ((ROBOT_HOSTNAME === JACKAL_HOSTNAME) || process.env.IS_JACKAL)
+// const NAV_PACKAGE_NAME = (IS_JACKAL)?"uaf_jackal_navigation":"uaf_husky_navigation";
+// const SCAN_TOPIC_NAME = (IS_JACKAL || process.env.IS_SIMULATION)?"/front/scan":"/scan";
+dlog(`IS_JACKAL: ${IS_JACKAL} ${process.env.IS_JACKAL}  NAV_PACKAGE_NAME: ${NAV_PACKAGE_NAME}  SCAN_TOPIC_NAME:${SCAN_TOPIC_NAME}`);
 
 function cam_log() {
     cam_print && console.log(`${Date.now() - TS_START},${misc_stats.conn_count},${image_requestors.length},${misc_stats.cur_bw_mbps},${misc_stats.avg_bw_mbps}`);
@@ -780,7 +787,8 @@ function on_local_navp_msg(navmsg) {
 }
 
 function run_navigation_gmapping() {
-    return run_child_process("roslaunch", [NAV_PACKAGE_NAME, "gmapping.launch"], false, false);
+    dlog(`Running ${NAV_PACKAGE_NAME}`);
+    return run_child_process("roslaunch", [NAV_PACKAGE_NAME, "gmapping.launch", "scan_topic:=" + SCAN_TOPIC_NAME], false, false);
 }
 
 function run_navigation_move_base() {
@@ -842,14 +850,13 @@ rosnodejs.initNode("/command_server")
         gmapping_proc = run_navigation_gmapping();
         navigation_proc = run_navigation_move_base();
 
-        setInterval(send_tforms, 16, frame_tforms);
+        setInterval(send_tforms, 30, frame_tforms);
         setInterval(update_param_check, 100, cur_param_proc, param_stack);
         setInterval(update_and_send_misc_stats, MISC_STAT_PERIOD_MS);
 
         // Subscribe to the occupancy grid map messages - send packet with the map info
         ros_node.subscribe("/map", "nav_msgs/OccupancyGrid",
                            (occ_grid_msg) => {
-                               ilog("Should be sending map...");
                                cm_log(`${occ_grid_msg.info.height*occ_grid_msg.info.width},,`);
                                send_occ_grid_to_clients(occ_grid_msg, prev_frame_map_msg, map_header);
                                prev_frame_map_msg = occ_grid_msg;
