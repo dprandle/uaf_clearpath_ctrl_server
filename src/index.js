@@ -32,7 +32,7 @@ const ROBOT_HOSTNAME = os.hostname();
 
 const IS_JACKAL = ((ROBOT_HOSTNAME === JACKAL_HOSTNAME) || (process.env.IS_JACKAL === "1"));
 let NAV_PACKAGE_NAME = (IS_JACKAL)?"uaf_jackal_navigation":"uaf_husky_navigation";
-const SCAN_TOPIC_NAME = ((IS_JACKAL === 1) || (process.env.IS_SIMULATION === "1"))?"front/scan":"scan";
+const SCAN_TOPIC_NAME = ((IS_JACKAL) || (process.env.IS_SIMULATION === "1"))?"front/scan":"scan";
 
 let jackal_cam_sub = null;
 let image_requestors = [];
